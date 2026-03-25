@@ -421,6 +421,12 @@ const HERO_TEXT_LOOPS = [
   "Smart notes, practice sets, and final mastery checks.",
 ];
 
+const STARTUP_LOADING_MESSAGES = [
+  "Waking up servers...",
+  "Preparing your course...",
+  "Almost there...",
+];
+
 function AiTutorPanel({ courseTopic, level, currentTopic, allTopics, onClose, persistedMessages, onMessagesChange }) {
   useScrollLock();
 
@@ -568,6 +574,47 @@ function CourseLoadingOverlay({ topic, level }) {
         <div className="clo-level">{level} · AI-powered curriculum</div>
         <div className="clo-dots">
           <span className="clo-dot" style={{ animationDelay: "0s" }} /><span className="clo-dot" style={{ animationDelay: "0.2s" }} /><span className="clo-dot" style={{ animationDelay: "0.4s" }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StartupLoadingOverlay() {
+  useScrollLock();
+  const [messageIndex, setMessageIndex] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setMessageIndex((prev) => (prev + 1) % STARTUP_LOADING_MESSAGES.length);
+    }, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <div className="startup-overlay" role="status" aria-live="polite" aria-busy="true">
+      <div className="startup-card">
+        <div className="startup-clock" aria-hidden="true">
+          <div className="startup-clock-face">
+            <span className="startup-clock-mark startup-clock-mark-top" />
+            <span className="startup-clock-mark startup-clock-mark-right" />
+            <span className="startup-clock-mark startup-clock-mark-bottom" />
+            <span className="startup-clock-mark startup-clock-mark-left" />
+            <span className="startup-clock-hand startup-clock-hour" />
+            <span className="startup-clock-hand startup-clock-minute" />
+            <span className="startup-clock-center" />
+          </div>
+        </div>
+        <div className="startup-title">Please wait fo sometime Do not refresh or leave</div>
+        <div className="startup-message-wrap">
+          {STARTUP_LOADING_MESSAGES.map((message, index) => (
+            <p
+              key={message}
+              className={`startup-message ${index === messageIndex ? "startup-message-visible" : ""}`}
+            >
+              {message}
+            </p>
+          ))}
         </div>
       </div>
     </div>
@@ -1980,6 +2027,133 @@ export default function Home() {
         @keyframes dotPop { 0%,100%{opacity:.2;transform:scale(.7)} 50%{opacity:1;transform:scale(1.2)} }
         @keyframes cloIn { from{opacity:0} to{opacity:1} }
         @keyframes cloUp { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:none} }
+        @keyframes startupGlow { 0%,100%{transform:scale(1); box-shadow:0 0 0 0 rgba(8,145,178,.14);} 50%{transform:scale(1.03); box-shadow:0 0 0 16px rgba(8,145,178,0);} }
+        @keyframes startupTickHour { from{transform:translateX(-50%) rotate(0deg)} to{transform:translateX(-50%) rotate(360deg)} }
+        @keyframes startupTickMinute { from{transform:translateX(-50%) rotate(0deg)} to{transform:translateX(-50%) rotate(360deg)} }
+        @keyframes startupMessageIn { from{opacity:0; transform:translateY(10px)} to{opacity:1; transform:translateY(0)} }
+
+        .startup-overlay {
+          position: fixed; inset: 0; z-index: 1200;
+          display: flex; align-items: center; justify-content: center;
+          padding: 24px;
+          background:
+            radial-gradient(circle at top, rgba(34,211,238,.22), transparent 42%),
+            linear-gradient(180deg, rgba(240,250,255,.96), rgba(224,244,252,.98));
+          backdrop-filter: blur(14px);
+          animation: cloIn .35s var(--ease2) both;
+        }
+        body.dark-mode .startup-overlay {
+          background:
+            radial-gradient(circle at top, rgba(124,58,237,.25), transparent 42%),
+            linear-gradient(180deg, rgba(8,8,16,.96), rgba(13,13,26,.98));
+        }
+        .startup-card {
+          width: min(560px, 100%);
+          padding: 34px 28px;
+          border-radius: 28px;
+          border: 1px solid var(--border2);
+          background: rgba(255,255,255,.74);
+          box-shadow: 0 24px 70px rgba(8,145,178,.16);
+          display: flex; flex-direction: column; align-items: center;
+          text-align: center;
+          gap: 18px;
+          animation: cloUp .5s var(--ease2) both;
+        }
+        body.dark-mode .startup-card {
+          background: rgba(12,12,24,.86);
+          box-shadow: 0 24px 70px rgba(0,0,0,.35);
+        }
+        .startup-clock {
+          width: 108px; height: 108px;
+          border-radius: 50%;
+          display: flex; align-items: center; justify-content: center;
+          background: linear-gradient(135deg, rgba(255,255,255,.92), rgba(34,211,238,.16));
+          animation: startupGlow 2.4s ease-in-out infinite;
+        }
+        body.dark-mode .startup-clock {
+          background: linear-gradient(135deg, rgba(255,255,255,.1), rgba(124,58,237,.18));
+        }
+        .startup-clock-face {
+          position: relative;
+          width: 78px; height: 78px;
+          border-radius: 50%;
+          border: 3px solid var(--accent);
+          background: rgba(255,255,255,.86);
+        }
+        body.dark-mode .startup-clock-face { background: rgba(8,8,16,.95); }
+        .startup-clock-mark {
+          position: absolute;
+          background: var(--accent-mid);
+          border-radius: 999px;
+        }
+        .startup-clock-mark-top,
+        .startup-clock-mark-bottom {
+          width: 4px; height: 10px; left: 50%; transform: translateX(-50%);
+        }
+        .startup-clock-mark-top { top: 7px; }
+        .startup-clock-mark-bottom { bottom: 7px; }
+        .startup-clock-mark-left,
+        .startup-clock-mark-right {
+          width: 10px; height: 4px; top: 50%; transform: translateY(-50%);
+        }
+        .startup-clock-mark-left { left: 7px; }
+        .startup-clock-mark-right { right: 7px; }
+        .startup-clock-hand {
+          position: absolute;
+          left: 50%;
+          bottom: 50%;
+          transform-origin: bottom center;
+          border-radius: 999px;
+        }
+        .startup-clock-hour {
+          width: 4px; height: 20px;
+          background: var(--text);
+          animation: startupTickHour 9s linear infinite;
+        }
+        .startup-clock-minute {
+          width: 2px; height: 28px;
+          background: var(--orange);
+          animation: startupTickMinute 3s linear infinite;
+        }
+        .startup-clock-center {
+          position: absolute;
+          width: 10px; height: 10px;
+          border-radius: 50%;
+          background: var(--orange);
+          top: 50%; left: 50%; transform: translate(-50%, -50%);
+          box-shadow: 0 0 0 4px rgba(249,115,22,.14);
+        }
+        .startup-title {
+          font-family: var(--ff-head);
+          font-size: clamp(1.3rem, 3vw, 1.9rem);
+          font-weight: 800;
+          line-height: 1.25;
+          color: var(--text);
+          max-width: 18ch;
+        }
+        .startup-message-wrap {
+          position: relative;
+          min-height: 28px;
+          width: 100%;
+        }
+        .startup-message {
+          position: absolute;
+          inset: 0;
+          margin: 0;
+          opacity: 0;
+          transform: translateY(10px);
+          font-family: var(--ff-mono);
+          font-size: 11px;
+          letter-spacing: .18em;
+          text-transform: uppercase;
+          color: var(--text2);
+          transition: opacity .35s ease, transform .35s ease;
+        }
+        .startup-message-visible {
+          opacity: 1;
+          transform: translateY(0);
+          animation: startupMessageIn .35s ease;
+        }
 
         .clo-overlay { position:fixed; inset:0; z-index:1000; display:flex; align-items:center; justify-content:center; background:rgba(240,250,255,.93); backdrop-filter:blur(18px); animation:cloIn .4s var(--ease2) both; }
         body.dark-mode .clo-overlay { background: rgba(8,8,16,.92); }
@@ -2693,6 +2867,8 @@ export default function Home() {
 
       {/* Block wipe transition overlay */}
       <div className={`theme-wipe${themeTransition ? " active" : ""}`} />
+
+      {authLoading && <StartupLoadingOverlay />}
 
       {loading && <CourseLoadingOverlay topic={topic} level={level} />}
 
