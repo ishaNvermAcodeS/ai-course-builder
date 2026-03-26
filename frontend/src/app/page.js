@@ -12,23 +12,24 @@ axios.defaults.withCredentials = true;
 // ─── Scroll Lock ──────────────────────────────────────────────────────────────
 function useScrollLock() {
   useLayoutEffect(() => {
-    const scrollY = window.scrollY;
     const prev = {
-      overflow: document.body.style.overflow,
-      position: document.body.style.position,
-      top: document.body.style.top,
-      width: document.body.style.width,
+      htmlOverflow: document.documentElement.style.overflow,
+      bodyOverflow: document.body.style.overflow,
+      bodyPaddingRight: document.body.style.paddingRight,
+      touchAction: document.body.style.touchAction,
     };
+    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+    document.documentElement.style.overflow = "hidden";
     document.body.style.overflow = "hidden";
-    document.body.style.position = "fixed";
-    document.body.style.top = `-${scrollY}px`;
-    document.body.style.width = "100%";
+    if (scrollbarWidth > 0) {
+      document.body.style.paddingRight = `${scrollbarWidth}px`;
+    }
+    document.body.style.touchAction = "none";
     return () => {
-      document.body.style.overflow = prev.overflow;
-      document.body.style.position = prev.position;
-      document.body.style.top = prev.top;
-      document.body.style.width = prev.width;
-      window.scrollTo(0, scrollY);
+      document.documentElement.style.overflow = prev.htmlOverflow;
+      document.body.style.overflow = prev.bodyOverflow;
+      document.body.style.paddingRight = prev.bodyPaddingRight;
+      document.body.style.touchAction = prev.touchAction;
     };
   }, []);
 }
