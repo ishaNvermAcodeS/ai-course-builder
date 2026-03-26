@@ -983,9 +983,13 @@ Format:
 Q1: <Question>
 ANSWER: <Detailed answer — show working for numerical>
 
-...up to Q10. Start directly with Q1, no preamble.
+Rules:
+- Use exactly the labels `Q1:` through `Q10:`
+- Every question must be followed by one `ANSWER:` line or paragraph
+- No markdown fences
+- Start directly with Q1, no preamble
 """
-    return {"practice": call_llm(prompt, max_tokens=3500)}
+    return {"practice": call_llm(prompt, max_tokens=2200)}
 
 
 @app.post("/generate-revision")
@@ -1015,9 +1019,12 @@ Topics:
 ## Quick Reference
 (Most important terms/formulas)
 
-Keep it focused and revision-optimised.
+Rules:
+- Keep it focused and revision-optimised
+- No markdown fences
+- Keep total length compact enough to load quickly in a study panel
 """
-    return {"revision": call_llm(prompt, max_tokens=2500)}
+    return {"revision": call_llm(prompt, max_tokens=1600)}
 
 
 @app.post("/generate-notes")
@@ -1048,9 +1055,13 @@ For each topic group:
 ## Summary of Key Principles
 (7-10 bullet points)
 
-Rules: crisp, **bold** key terms, self-contained sections.
+Rules:
+- Crisp and self-contained
+- Use **bold** for key terms
+- No markdown fences
+- Keep the response concise enough for a modal notes view
 """
-    return {"notes": call_llm(prompt, max_tokens=3000)}
+    return {"notes": call_llm(prompt, max_tokens=1800)}
 
 
 @app.post("/generate-study-suggestion")

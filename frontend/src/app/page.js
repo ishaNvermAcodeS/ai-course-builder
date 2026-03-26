@@ -643,6 +643,7 @@ function PracticePanel({ courseTopic, level, allTopics, onClose }) {
   useScrollLock();
   const [loading, setLoading] = useState(true);
   const [questions, setQuestions] = useState([]);
+  const [error, setError] = useState("");
   const [expanded, setExpanded] = useState(new Set());
   const bodyRef = usePanelScrollTop(loading);
 
@@ -650,8 +651,16 @@ function PracticePanel({ courseTopic, level, allTopics, onClose }) {
     const gen = async () => {
       try {
         const res = await axios.post(`${API_BASE}/generate-practice-questions`, { topic: courseTopic, level, all_topics: allTopics });
-        setQuestions(parsePracticeQuestions(res.data.practice));
-      } catch (e) { console.error(e); }
+        const parsedQuestions = parsePracticeQuestions(res.data.practice);
+        if (parsedQuestions.length === 0) {
+          throw new Error("No practice questions were generated.");
+        }
+        setQuestions(parsedQuestions);
+        setError("");
+      } catch (e) {
+        console.error(e);
+        setError(getErrorMessage(e, "Could not generate practice questions right now. Please try again."));
+      }
       finally { setLoading(false); }
     };
     gen();
@@ -676,8 +685,10 @@ function PracticePanel({ courseTopic, level, allTopics, onClose }) {
         <div className="mode-body" ref={bodyRef}>
           {loading
             ? <CinematicLoader label="Crafting exam questions…" sublabel="Analysing course topics" />
-            : questions.length === 0
-              ? <div className="mode-empty">Could not generate questions. Please try again.</div>
+            : error
+              ? <div className="mode-empty">{error}</div>
+              : questions.length === 0
+                ? <div className="mode-empty">Could not generate questions. Please try again.</div>
               : <div className="practice-cards">{questions.map((q, i) => { const isOpen = expanded.has(i); return (<div key={i} className={`pq-card ${isOpen ? "pq-open" : ""}`} onClick={() => toggle(i)}><div className="pq-card-top"><span className="pq-num">Q{i + 1}</span><span className="pq-question">{q.question}</span><span className="pq-chevron" style={{ transform: isOpen ? "rotate(180deg)" : "rotate(0)" }}>▾</span></div>{isOpen && <div className="pq-answer" onClick={(e) => e.stopPropagation()}><div className="pq-answer-label">Model Answer</div><p className="pq-answer-text">{q.answer}</p></div>}</div>); })}</div>
           }
         </div>
@@ -690,14 +701,23 @@ function RevisionPanel({ courseTopic, level, allTopics, onClose }) {
   useScrollLock();
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState("");
+  const [error, setError] = useState("");
   const bodyRef = usePanelScrollTop(loading);
 
   useEffect(() => {
     const gen = async () => {
       try {
         const res = await axios.post(`${API_BASE}/generate-revision`, { topic: courseTopic, level, all_topics: allTopics });
-        setRevision(res.data.revision);
-      } catch (e) { console.error(e); }
+        const revisionText = (res.data.revision || "").trim();
+        if (!revisionText) {
+          throw new Error("Revision summary was empty.");
+        }
+        setRevision(revisionText);
+        setError("");
+      } catch (e) {
+        console.error(e);
+        setError(getErrorMessage(e, "Could not generate revision notes right now. Please try again."));
+      }
       finally { setLoading(false); }
     };
     gen();
@@ -720,7 +740,9 @@ function RevisionPanel({ courseTopic, level, allTopics, onClose }) {
         <div className="mode-body" ref={bodyRef}>
           {loading
             ? <CinematicLoader label="Compiling revision notes…" sublabel="Summarising all course topics" />
-            : <div className="revision-content"><LessonText text={revision} /></div>
+            : error
+              ? <div className="mode-empty">{error}</div>
+              : <div className="revision-content"><LessonText text={revision} /></div>
           }
         </div>
       </div>
@@ -732,14 +754,23 @@ function NotesPanel({ courseTopic, level, allTopics, onClose }) {
   useScrollLock();
   const [loading, setLoading] = useState(true);
   const [notes, setNotes] = useState("");
+  const [error, setError] = useState("");
   const bodyRef = usePanelScrollTop(loading);
 
   useEffect(() => {
     const gen = async () => {
       try {
         const res = await axios.post(`${API_BASE}/generate-notes`, { topic: courseTopic, level, all_topics: allTopics });
-        setNotes(res.data.notes);
-      } catch (e) { console.error(e); }
+        const notesText = (res.data.notes || "").trim();
+        if (!notesText) {
+          throw new Error("Notes response was empty.");
+        }
+        setNotes(notesText);
+        setError("");
+      } catch (e) {
+        console.error(e);
+        setError(getErrorMessage(e, "Could not generate AI notes right now. Please try again."));
+      }
       finally { setLoading(false); }
     };
     gen();
@@ -775,7 +806,9 @@ function NotesPanel({ courseTopic, level, allTopics, onClose }) {
         <div className="mode-body" ref={bodyRef}>
           {loading
             ? <CinematicLoader label="Generating AI notes…" sublabel="Structuring key concepts" />
-            : (
+            : error
+              ? <div className="mode-empty">{error}</div>
+              : (
               <>
                 <div className="notes-content"><LessonText text={notes} /></div>
                 <div className="notes-download-row">
@@ -2951,7 +2984,7 @@ export default function Home() {
                 />
               ))}
             </div>
-            <CourseBottomActions courseTopic={course.course_title} level={activeLevel} allTopics={getAllTopics(course)} />
+            <CourseBottomActions courseTopic={activeTopic} level={activeLevel} allTopics={getAllTopics(course)} />
           </div>
 
           {!tutorOpen && <AiTutorFab onClick={() => setTutorOpen(true)} />}
