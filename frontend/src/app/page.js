@@ -2407,9 +2407,9 @@ export default function Home() {
         @keyframes revealDown { from{opacity:0;transform:translateY(-4px)} to{opacity:1;transform:none} }
         @keyframes starSpin { 0%,100%{transform:rotate(0deg) scale(1)} 50%{transform:rotate(180deg) scale(1.15)} }
 
-        .mode-overlay { position:fixed; inset:0; z-index:1000; background:rgba(230,248,255,.82); backdrop-filter:blur(12px); display:flex; align-items:center; justify-content:center; animation:overlayIn .3s ease both; overflow:hidden; padding:24px; }
+        .mode-overlay { position:fixed; inset:0; z-index:1000; background:rgba(230,248,255,.82); backdrop-filter:blur(12px); display:flex; align-items:flex-start; justify-content:center; animation:overlayIn .3s ease both; overflow-y:auto; overflow-x:hidden; padding:88px 24px 24px; }
         body.dark-mode .mode-overlay { background:rgba(5,5,14,.9); }
-        .mode-panel { width:min(740px, calc(100vw - 48px)); background:#ffffff; border:1px solid var(--border2); border-radius:24px; box-shadow:0 30px 80px rgba(8,145,178,.18); display:flex; flex-direction:column; height:min(86vh, 880px); max-height:calc(100vh - 48px); animation:popIn .32s var(--ease2) both; overflow:hidden; position:relative; flex-shrink:0; }
+        .mode-panel { width:min(740px, calc(100vw - 48px)); background:#ffffff; border:1px solid var(--border2); border-radius:24px; box-shadow:0 30px 80px rgba(8,145,178,.18); display:flex; flex-direction:column; height:min(86vh, 880px); max-height:calc(100vh - 112px); animation:popIn .32s var(--ease2) both; overflow:hidden; position:relative; flex-shrink:0; margin:0 auto; }
         body.dark-mode .mode-panel { background:#0c0c1e; }
         .mode-panel-wide { width:min(820px, calc(100vw - 48px)); }
         .mode-header { flex:0 0 auto; display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:24px 28px 18px; border-bottom:1px solid var(--border); }
@@ -2872,7 +2872,7 @@ export default function Home() {
           .mode-panel,.mode-panel-wide,.qm-panel,.prof-panel,.ca-panel,.fct-panel,.tutor-panel{width:100vw;border-left:none;border-top:1px solid var(--border2)}
           .mode-panel,.mode-panel-wide{height:100dvh;max-height:100vh;border-radius:0;box-shadow:none}
           .mode-overlay,.prof-overlay,.qm-overlay,.ca-overlay,.fct-overlay,.tutor-overlay{align-items:flex-end;justify-content:stretch}
-          .mode-overlay{padding:0}
+          .mode-overlay{padding:0;align-items:flex-end;overflow:hidden}
           @keyframes panelIn{from{transform:translateY(40px);opacity:0}to{transform:none;opacity:1}}
           .mode-header,.qm-header,.fct-header,.ca-header,.prof-header,.tutor-header{padding:18px 18px 14px}
           .mode-body,.qm-body,.fct-body,.ca-body,.prof-body{padding:16px 16px 20px}
