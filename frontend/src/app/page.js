@@ -581,6 +581,51 @@ function CourseLoadingOverlay({ topic, level }) {
   );
 }
 
+const TOOL_MODAL_OVERLAY_STYLE = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 1200,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "24px",
+  background: "rgba(230, 248, 255, 0.82)",
+  backdropFilter: "blur(12px)",
+  overflowY: "auto",
+  overflowX: "hidden",
+};
+
+const TOOL_MODAL_PANEL_STYLE = {
+  width: "min(820px, calc(100vw - 48px))",
+  maxHeight: "min(88vh, 920px)",
+  background: "#ffffff",
+  border: "1px solid rgba(0,0,0,0.12)",
+  borderRadius: "24px",
+  boxShadow: "0 30px 80px rgba(8,145,178,.18)",
+  display: "flex",
+  flexDirection: "column",
+  overflow: "hidden",
+  margin: "auto",
+};
+
+function ToolModalShell({ children, onClose, wide = false }) {
+  return (
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={TOOL_MODAL_OVERLAY_STYLE}
+    >
+      <div
+        style={{
+          ...TOOL_MODAL_PANEL_STYLE,
+          width: wide ? "min(900px, calc(100vw - 48px))" : "min(760px, calc(100vw - 48px))",
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function StartupLoadingOverlay() {
   useScrollLock();
   const [messageIndex, setMessageIndex] = useState(0);
@@ -641,7 +686,6 @@ function usePanelScrollTop(triggerKey) {
 
 // ─── Mode Panels ──────────────────────────────────────────────────────────────
 function PracticePanel({ courseTopic, level, allTopics, onClose }) {
-  useScrollLock();
   const [loading, setLoading] = useState(true);
   const [questions, setQuestions] = useState([]);
   const [error, setError] = useState("");
@@ -673,8 +717,15 @@ function PracticePanel({ courseTopic, level, allTopics, onClose }) {
   const toggle = (i) => setExpanded(prev => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; });
 
   return (
-    <div className="mode-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="mode-panel">
+    <ToolModalShell onClose={onClose}>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          minHeight: "min(88vh, 920px)",
+          maxHeight: "min(88vh, 920px)",
+        }}
+      >
         <div className="mode-header">
           <div>
             <span className="mode-eyebrow">Practice Mode</span>
@@ -694,12 +745,11 @@ function PracticePanel({ courseTopic, level, allTopics, onClose }) {
           }
         </div>
       </div>
-    </div>
+    </ToolModalShell>
   );
 }
 
 function RevisionPanel({ courseTopic, level, allTopics, onClose }) {
-  useScrollLock();
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState("");
   const [error, setError] = useState("");
@@ -728,8 +778,15 @@ function RevisionPanel({ courseTopic, level, allTopics, onClose }) {
   }, [courseTopic, level, allTopics, onClose]);
 
   return (
-    <div className="mode-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="mode-panel mode-panel-wide">
+    <ToolModalShell onClose={onClose} wide>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          minHeight: "min(88vh, 920px)",
+          maxHeight: "min(88vh, 920px)",
+        }}
+      >
         <div className="mode-header">
           <div>
             <span className="mode-eyebrow">Revision Mode</span>
@@ -747,12 +804,11 @@ function RevisionPanel({ courseTopic, level, allTopics, onClose }) {
           }
         </div>
       </div>
-    </div>
+    </ToolModalShell>
   );
 }
 
 function NotesPanel({ courseTopic, level, allTopics, onClose }) {
-  useScrollLock();
   const [loading, setLoading] = useState(true);
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
@@ -794,8 +850,15 @@ function NotesPanel({ courseTopic, level, allTopics, onClose }) {
   };
 
   return (
-    <div className="mode-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="mode-panel mode-panel-wide">
+    <ToolModalShell onClose={onClose} wide>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          minHeight: "min(88vh, 920px)",
+          maxHeight: "min(88vh, 920px)",
+        }}
+      >
         <div className="mode-header">
           <div>
             <span className="mode-eyebrow">AI Notes</span>
@@ -827,7 +890,7 @@ function NotesPanel({ courseTopic, level, allTopics, onClose }) {
           }
         </div>
       </div>
-    </div>
+    </ToolModalShell>
   );
 }
 
