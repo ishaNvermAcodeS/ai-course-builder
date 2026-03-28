@@ -50,7 +50,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 VIDEO_HOST_BLOCKLIST = {
     "youtube.com",
@@ -67,6 +68,13 @@ difficulty_guide = {
     "Intermediate": "Assume some background knowledge and include practical techniques. Use 6 to 9 chapters with 4 to 6 topics each.",
     "Advanced":     "Include deeper theory, optimization techniques and advanced ideas. Use 9 to 14 chapters with 5 to 7 topics each.",
 }
+goal_guide = {
+    "Exam Preparation": "Optimize for exam outcomes: high-yield concepts, likely questions, past-pattern style coverage, and fast retention.",
+    "Deep Learning": "Optimize for deep understanding of the chosen topic: richer explanations, intuition, rigor, worked examples, and long-term retention. Treat this as learning in depth, not the machine learning field unless the topic itself is Deep Learning.",
+    "Quick Revision": "Optimize for compact refreshers, summaries, memory cues, and the fastest path to competence.",
+}
+INACTIVITY_HOURS = 24
+CLASSROOM_DEADLINE_WINDOW_DAYS = 7
 
 QUANTITATIVE_KEYWORDS = {
     "algebra", "calculus", "geometry", "trigonometry", "statistics", "probability",
@@ -176,6 +184,69 @@ def init_db():
                 PRIMARY KEY (user_id, topic, level)
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS user_progress (
+                user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                course_topic TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                score REAL NOT NULL,
+                mastery TEXT NOT NULL,
+                last_updated TEXT NOT NULL,
+                PRIMARY KEY (user_id, course_topic, topic)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS learner_state (
+                user_id BIGINT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+                last_active_time TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS revision_lessons (
+                user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                course_topic TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                level TEXT NOT NULL,
+                revision_text TEXT NOT NULL,
+                trigger_reason TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, course_topic, topic, level)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS classroom_connections (
+                user_id BIGINT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                is_connected BOOLEAN NOT NULL DEFAULT TRUE,
+                is_mock BOOLEAN NOT NULL DEFAULT FALSE,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS classroom_courses (
+                user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                classroom_course_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                section TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, classroom_course_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS classroom_assignments (
+                user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                assignment_id TEXT NOT NULL,
+                classroom_course_id TEXT NOT NULL,
+                course_name TEXT NOT NULL,
+                title TEXT NOT NULL,
+                topic_hint TEXT NOT NULL DEFAULT '',
+                due_at TEXT,
+                raw_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, assignment_id)
+            )
+            """,
         ]
         for statement in statements:
             db_execute(conn, statement)
@@ -229,6 +300,69 @@ def init_db():
                 PRIMARY KEY (user_id, topic, level),
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS user_progress (
+                user_id INTEGER NOT NULL,
+                course_topic TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                score REAL NOT NULL,
+                mastery TEXT NOT NULL,
+                last_updated TEXT NOT NULL,
+                PRIMARY KEY (user_id, course_topic, topic),
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS learner_state (
+                user_id INTEGER PRIMARY KEY,
+                last_active_time TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS revision_lessons (
+                user_id INTEGER NOT NULL,
+                course_topic TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                level TEXT NOT NULL,
+                revision_text TEXT NOT NULL,
+                trigger_reason TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, course_topic, topic, level),
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS classroom_connections (
+                user_id INTEGER PRIMARY KEY,
+                provider TEXT NOT NULL,
+                is_connected INTEGER NOT NULL DEFAULT 1,
+                is_mock INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS classroom_courses (
+                user_id INTEGER NOT NULL,
+                classroom_course_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                section TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, classroom_course_id),
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS classroom_assignments (
+                user_id INTEGER NOT NULL,
+                assignment_id TEXT NOT NULL,
+                classroom_course_id TEXT NOT NULL,
+                course_name TEXT NOT NULL,
+                title TEXT NOT NULL,
+                topic_hint TEXT NOT NULL DEFAULT '',
+                due_at TEXT,
+                raw_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, assignment_id),
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            );
             """
         )
     conn.commit()
@@ -242,6 +376,31 @@ init_db()
 
 def utc_now():
     return datetime.now(timezone.utc)
+
+
+def safe_topic(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def normalize_key(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", safe_topic(text).lower()).strip()
+
+
+def mastery_bucket(score: float) -> str:
+    if score < 60:
+        return "weak"
+    if score <= 80:
+        return "moderate"
+    return "strong"
+
+
+def parse_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def strip_fences(text: str) -> str:
@@ -271,6 +430,8 @@ def parse_json_object(text: str):
 
 
 def call_llm(prompt: str, max_tokens: Optional[int] = None, messages: Optional[list] = None):
+    if client is None:
+        raise HTTPException(status_code=500, detail="Groq API key is missing. Set GROQ_API_KEY in backend/.env.")
     payload = messages if messages is not None else [{"role": "user", "content": prompt}]
     kwargs = {"model": "llama-3.3-70b-versatile", "messages": payload}
     if max_tokens is not None:
@@ -322,7 +483,7 @@ The remaining questions may be conceptual/analytical.
     return ""
 
 
-def build_lesson_prompt(topic: str, module: str, level: str) -> str:
+def build_lesson_prompt(topic: str, module: str, level: str, goal: str = "Deep Learning") -> str:
     course_type = classify_course_type(topic, [module])
     numerical_note = ""
     if course_type == "quantitative":
@@ -332,6 +493,14 @@ Since this is a quantitative topic, make sure the lesson includes:
 - Any relevant formulas clearly stated and explained
 - A practice problem (with solution) at the end
 """
+    goal_key = goal if goal in goal_guide else "Deep Learning"
+    goal_instruction = goal_guide[goal_key]
+    goal_clarifier = ""
+    if goal_key == "Deep Learning":
+        goal_clarifier = """
+Interpret "Deep Learning" as "deep study mode" for the requested topic.
+Do not switch the subject to machine learning unless the course topic itself is about ML or deep learning.
+"""
     return f"""
 Create a {level} level lesson.
 
@@ -339,6 +508,8 @@ Course Topic: {topic}
 Lesson Topic: {module}
 
 Difficulty guideline: {difficulty_guide[level]}
+Goal guidance: {goal_instruction}
+{goal_clarifier}
 {numerical_note}
 Format using: ## for headings, **bold** for key terms, __underline__ for definitions,
 - bullets, numbered lists, `code` for technical terms/expressions.
@@ -347,8 +518,28 @@ Structure: Introduction, Core Explanation, Worked Examples, Key Points, Summary.
 """
 
 
-def generate_lesson_text(topic: str, module: str, level: str) -> str:
-    return call_llm(build_lesson_prompt(topic, module, level))
+def generate_lesson_text(topic: str, module: str, level: str, goal: str = "Deep Learning") -> str:
+    primary_prompt = build_lesson_prompt(topic, module, level, goal)
+    try:
+        return call_llm(primary_prompt, max_tokens=1600)
+    except HTTPException:
+        fallback_prompt = f"""
+Create a clean, useful lesson for this topic.
+
+Course Topic: {topic}
+Lesson Topic: {module}
+Level: {level}
+Goal: {goal}
+
+Rules:
+- Stay on the requested subject
+- Use short sections with headings
+- Explain core ideas clearly
+- Include at least one example
+- End with a brief summary
+- No markdown fences
+"""
+        return call_llm(fallback_prompt, max_tokens=1200)
 
 
 def parse_search_snippet(snippet: str) -> str:
@@ -372,6 +563,105 @@ def parse_json_array(raw: str) -> list:
             if isinstance(parsed, list):
                 return parsed
     raise HTTPException(status_code=502, detail="Model returned invalid JSON array.")
+
+
+def sanitize_course_outline(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="Model returned an invalid course format.")
+
+    course_title = safe_topic(payload.get("course_title") or "AI Generated Course")
+    chapters = payload.get("chapters")
+    if not isinstance(chapters, list) or not chapters:
+        raise HTTPException(status_code=502, detail="Model returned a course without chapters.")
+
+    clean_chapters = []
+    for index, chapter in enumerate(chapters, start=1):
+        if not isinstance(chapter, dict):
+            continue
+        title = safe_topic(chapter.get("title") or f"Chapter {index}")
+        raw_topics = chapter.get("topics")
+        if not isinstance(raw_topics, list):
+            continue
+        topics = []
+        seen = set()
+        for topic in raw_topics:
+            cleaned = safe_topic(str(topic))
+            key = normalize_key(cleaned)
+            if not cleaned or not key or key in seen:
+                continue
+            seen.add(key)
+            topics.append(cleaned[:80])
+        if topics:
+            clean_chapters.append({"chapter": index, "title": title, "topics": topics})
+
+    if not clean_chapters:
+        raise HTTPException(status_code=502, detail="Model returned empty course topics.")
+
+    return {"course_title": course_title, "chapters": clean_chapters}
+
+
+def generate_course_outline(topic: str, level: str, goal: str, classroom_context: str) -> dict:
+    prompt = f"""
+You are a curriculum designer. Create a complete, well-structured course for the topic below.
+
+Topic: {topic}
+Level: {level}
+Goal: {goal}
+
+Difficulty guideline:
+{difficulty_guide[level]}
+
+Goal guidance:
+{goal_guide[goal]}{classroom_context}
+
+Rules:
+- Each chapter should have a clear, descriptive title.
+- Each topic inside a chapter should be a short, specific lesson title (under 8 words).
+- Topics within a chapter should flow logically.
+- Do NOT repeat topics across chapters.
+- Make the topic ordering match the goal. For exam preparation, front-load high-yield topics. For quick revision, front-load foundational refreshers.
+- If the goal is "Deep Learning", interpret it as deep understanding of THIS topic, not the ML domain unless the requested topic is actually about deep learning or neural networks.
+
+Return ONLY valid JSON in this exact shape:
+{{
+  "course_title": "<descriptive course title>",
+  "chapters": [
+    {{
+      "chapter": 1,
+      "title": "<chapter title>",
+      "topics": ["Topic 1", "Topic 2", "Topic 3"]
+    }}
+  ]
+}}
+"""
+
+    first_pass = call_llm(prompt, max_tokens=1400)
+    try:
+        return sanitize_course_outline(parse_json_object(first_pass))
+    except HTTPException:
+        repair_prompt = f"""
+Convert the following course draft into valid JSON only.
+
+Rules:
+- Keep the same academic meaning
+- Output ONLY valid JSON
+- Use this exact shape:
+{{
+  "course_title": "<descriptive course title>",
+  "chapters": [
+    {{
+      "chapter": 1,
+      "title": "<chapter title>",
+      "topics": ["Topic 1", "Topic 2", "Topic 3"]
+    }}
+  ]
+}}
+
+Draft:
+{first_pass}
+"""
+        repaired = call_llm(repair_prompt, max_tokens=1400)
+        return sanitize_course_outline(parse_json_object(repaired))
 
 
 def is_probably_english(text: str) -> bool:
@@ -444,6 +734,423 @@ Resources:
     return resources
 
 
+def touch_learner_activity(user_id: int):
+    now = utc_now().isoformat()
+    conn = get_db()
+    db_execute(
+        conn,
+        """INSERT INTO learner_state (user_id, last_active_time, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(user_id) DO UPDATE SET last_active_time=excluded.last_active_time, updated_at=excluded.updated_at""",
+        (user_id, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_learner_state(user_id: int):
+    conn = get_db()
+    row = db_fetchone(
+        conn,
+        "SELECT last_active_time, updated_at FROM learner_state WHERE user_id = ?",
+        (user_id,),
+    )
+    conn.close()
+    return row
+
+
+def get_user_progress_rows(user_id: int, course_topic: str):
+    conn = get_db()
+    rows = db_fetchall(
+        conn,
+        """SELECT topic, score, mastery, last_updated
+           FROM user_progress
+           WHERE user_id = ? AND course_topic = ?""",
+        (user_id, safe_topic(course_topic)),
+    )
+    conn.close()
+    return rows
+
+
+def save_user_progress_row(user_id: int, course_topic: str, topic: str, score: float):
+    score = max(0.0, min(float(score), 100.0))
+    mastery = mastery_bucket(score)
+    now = utc_now().isoformat()
+    conn = get_db()
+    db_execute(
+        conn,
+        """INSERT INTO user_progress (user_id, course_topic, topic, score, mastery, last_updated)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(user_id, course_topic, topic) DO UPDATE SET
+               score=excluded.score,
+               mastery=excluded.mastery,
+               last_updated=excluded.last_updated""",
+        (user_id, safe_topic(course_topic), safe_topic(topic), score, mastery, now),
+    )
+    conn.commit()
+    conn.close()
+    return {"topic": safe_topic(topic), "score": round(score, 1), "mastery": mastery, "last_updated": now}
+
+
+def get_revision_entry(user_id: int, course_topic: str, topic: str, level: str):
+    conn = get_db()
+    row = db_fetchone(
+        conn,
+        """SELECT revision_text, trigger_reason, updated_at
+           FROM revision_lessons
+           WHERE user_id = ? AND course_topic = ? AND topic = ? AND level = ?""",
+        (user_id, safe_topic(course_topic), safe_topic(topic), safe_topic(level)),
+    )
+    conn.close()
+    return row
+
+
+def generate_revision_text(course_topic: str, topic: str, level: str, goal: str = "Quick Revision") -> str:
+    prompt = f"""
+Create a compressed revision lesson for a student who needs fast improvement.
+
+Course: {course_topic}
+Focus topic: {topic}
+Level: {level}
+Goal: {goal}
+
+Rules:
+- Prioritize exam-relevant concepts and common mistakes
+- Keep it concise, high-impact, and actionable
+- Include:
+  1. Top 3 must-know ideas
+  2. 2 common traps/mistakes
+  3. 1 fast recall checklist
+  4. 2 quick self-test prompts
+- No markdown fences
+- Keep it under 350 words
+"""
+    return call_llm(prompt, max_tokens=700)
+
+
+def ensure_revision_lesson(user_id: int, course_topic: str, topic: str, level: str, trigger_reason: str, force: bool = False):
+    existing = get_revision_entry(user_id, course_topic, topic, level)
+    existing_updated = parse_dt(existing["updated_at"]) if existing else None
+    if existing and existing_updated and not force:
+        if (utc_now() - existing_updated) < timedelta(hours=12):
+            return {
+                "topic": safe_topic(topic),
+                "revision": existing["revision_text"],
+                "trigger_reason": existing["trigger_reason"],
+                "updated_at": existing["updated_at"],
+            }
+
+    revision_text = generate_revision_text(course_topic, topic, level)
+    now = utc_now().isoformat()
+    conn = get_db()
+    db_execute(
+        conn,
+        """INSERT INTO revision_lessons (user_id, course_topic, topic, level, revision_text, trigger_reason, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(user_id, course_topic, topic, level) DO UPDATE SET
+               revision_text=excluded.revision_text,
+               trigger_reason=excluded.trigger_reason,
+               updated_at=excluded.updated_at""",
+        (user_id, safe_topic(course_topic), safe_topic(topic), safe_topic(level), revision_text, trigger_reason, now),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "topic": safe_topic(topic),
+        "revision": revision_text,
+        "trigger_reason": trigger_reason,
+        "updated_at": now,
+    }
+
+
+def build_mock_classroom_payload(course_topic: str = "General Studies"):
+    now = utc_now()
+    courses = [
+        {"id": "mock-course-1", "name": f"{course_topic} Classroom", "section": "Section A"},
+        {"id": "mock-course-2", "name": "Weekly Revision Hub", "section": "Self-study"},
+    ]
+    assignments = [
+        {
+            "id": "mock-assignment-1",
+            "course_id": "mock-course-1",
+            "course_name": f"{course_topic} Classroom",
+            "title": f"{course_topic} fundamentals worksheet",
+            "topic_hint": course_topic,
+            "due_at": (now + timedelta(days=2)).isoformat(),
+        },
+        {
+            "id": "mock-assignment-2",
+            "course_id": "mock-course-2",
+            "course_name": "Weekly Revision Hub",
+            "title": "Quick revision checkpoint",
+            "topic_hint": "revision",
+            "due_at": (now + timedelta(days=5)).isoformat(),
+        },
+    ]
+    return {"courses": courses, "assignments": assignments}
+
+
+def store_classroom_payload(user_id: int, payload: dict, is_mock: bool):
+    now = utc_now().isoformat()
+    courses = payload.get("courses", [])
+    assignments = payload.get("assignments", [])
+    conn = get_db()
+    db_execute(
+        conn,
+        """INSERT INTO classroom_connections (user_id, provider, is_connected, is_mock, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(user_id) DO UPDATE SET
+               provider=excluded.provider,
+               is_connected=excluded.is_connected,
+               is_mock=excluded.is_mock,
+               updated_at=excluded.updated_at""",
+        (user_id, "google_classroom", True, is_mock, now),
+    )
+    db_execute(conn, "DELETE FROM classroom_courses WHERE user_id = ?", (user_id,))
+    db_execute(conn, "DELETE FROM classroom_assignments WHERE user_id = ?", (user_id,))
+    for course in courses:
+        db_execute(
+            conn,
+            """INSERT INTO classroom_courses (user_id, classroom_course_id, name, section, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, classroom_course_id) DO UPDATE SET
+                   name=excluded.name, section=excluded.section, updated_at=excluded.updated_at""",
+            (user_id, safe_topic(course.get("id")), safe_topic(course.get("name")), safe_topic(course.get("section")), now),
+        )
+    for assignment in assignments:
+        db_execute(
+            conn,
+            """INSERT INTO classroom_assignments (user_id, assignment_id, classroom_course_id, course_name, title, topic_hint, due_at, raw_json, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, assignment_id) DO UPDATE SET
+                   classroom_course_id=excluded.classroom_course_id,
+                   course_name=excluded.course_name,
+                   title=excluded.title,
+                   topic_hint=excluded.topic_hint,
+                   due_at=excluded.due_at,
+                   raw_json=excluded.raw_json,
+                   updated_at=excluded.updated_at""",
+            (
+                user_id,
+                safe_topic(assignment.get("id")),
+                safe_topic(assignment.get("course_id")),
+                safe_topic(assignment.get("course_name")),
+                safe_topic(assignment.get("title")),
+                safe_topic(assignment.get("topic_hint")),
+                assignment.get("due_at"),
+                json.dumps(assignment),
+                now,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_classroom_snapshot(user_id: int):
+    conn = get_db()
+    connection = db_fetchone(
+        conn,
+        "SELECT provider, is_connected, is_mock, updated_at FROM classroom_connections WHERE user_id = ?",
+        (user_id,),
+    )
+    courses = db_fetchall(
+        conn,
+        "SELECT classroom_course_id, name, section, updated_at FROM classroom_courses WHERE user_id = ? ORDER BY name ASC",
+        (user_id,),
+    )
+    assignments = db_fetchall(
+        conn,
+        """SELECT assignment_id, classroom_course_id, course_name, title, topic_hint, due_at, raw_json, updated_at
+           FROM classroom_assignments
+           WHERE user_id = ?
+           ORDER BY COALESCE(due_at, '9999-12-31T00:00:00+00:00') ASC, title ASC""",
+        (user_id,),
+    )
+    conn.close()
+    course_items = [
+        {
+            "id": row["classroom_course_id"],
+            "name": row["name"],
+            "section": row["section"],
+            "updated_at": row["updated_at"],
+        }
+        for row in courses
+    ]
+    assignment_items = []
+    for row in assignments:
+        due_at = row["due_at"]
+        due_dt = parse_dt(due_at)
+        days_until_due = None
+        if due_dt:
+            days_until_due = max(0, int((due_dt - utc_now()).total_seconds() // 86400))
+        assignment_items.append(
+            {
+                "id": row["assignment_id"],
+                "course_id": row["classroom_course_id"],
+                "course_name": row["course_name"],
+                "title": row["title"],
+                "topic_hint": row["topic_hint"],
+                "due_at": due_at,
+                "days_until_due": days_until_due,
+                "raw": json.loads(row["raw_json"]),
+                "updated_at": row["updated_at"],
+            }
+        )
+    return {
+        "connected": bool(connection["is_connected"]) if connection else False,
+        "is_mock": bool(connection["is_mock"]) if connection else False,
+        "updated_at": connection["updated_at"] if connection else None,
+        "courses": course_items,
+        "assignments": assignment_items,
+    }
+
+
+def build_classroom_alerts(assignments: list):
+    alerts = []
+    for item in assignments:
+        days = item.get("days_until_due")
+        if days is None or days > CLASSROOM_DEADLINE_WINDOW_DAYS:
+            continue
+        title = item.get("title") or "Assignment"
+        topic_hint = item.get("topic_hint") or item.get("course_name") or "this topic"
+        alerts.append(
+            {
+                "assignment": title,
+                "topic_hint": topic_hint,
+                "days_until_due": days,
+                "message": f'Assignment deadline approaching. "{title}" is due in {days} day{"s" if days != 1 else ""}. Focus on {topic_hint}.',
+            }
+        )
+    return alerts
+
+
+def topic_priority_key(topic: str, progress_map: dict, alerts: list):
+    key = normalize_key(topic)
+    row = progress_map.get(key)
+    score = float(row["score"]) if row else 50.0
+    mastery_rank = {"weak": 0, "moderate": 1, "strong": 2}.get(row["mastery"], 1) if row else 1
+    deadline_rank = 99
+    for alert in alerts:
+        hint = normalize_key(alert.get("topic_hint"))
+        if hint and (hint in key or key in hint):
+            deadline_rank = min(deadline_rank, alert.get("days_until_due", 99))
+    return (deadline_rank, mastery_rank, score, topic.lower())
+
+
+def build_short_task(topic: str, level: str, weak: bool):
+    if weak:
+        return f"Spend 10 minutes revisiting '{topic}' at {level} level, then answer 3 self-check questions."
+    return f"Do a 5-minute recap of '{topic}' and write one key takeaway from memory."
+
+
+def build_recommendations_payload(user_id: int, course_topic: str, level: str, all_topics: list, use_classroom_data: bool):
+    topic_list = [safe_topic(item) for item in all_topics if safe_topic(item)]
+    progress_rows = get_user_progress_rows(user_id, course_topic)
+    progress_map = {normalize_key(row["topic"]): row for row in progress_rows}
+    weak_topics = []
+    moderate_topics = []
+    strong_topics = []
+    for topic in topic_list:
+        row = progress_map.get(normalize_key(topic))
+        if not row:
+            continue
+        item = {"topic": topic, "score": round(float(row["score"]), 1), "mastery": row["mastery"]}
+        if row["mastery"] == "weak":
+            weak_topics.append(item)
+        elif row["mastery"] == "moderate":
+            moderate_topics.append(item)
+        else:
+            strong_topics.append(item)
+
+    classroom = get_classroom_snapshot(user_id) if use_classroom_data else {"connected": False, "assignments": [], "courses": [], "updated_at": None, "is_mock": False}
+    alerts = build_classroom_alerts(classroom.get("assignments", [])) if classroom.get("connected") else []
+    reordered_topics = sorted(topic_list, key=lambda topic: topic_priority_key(topic, progress_map, alerts))
+    next_topic = reordered_topics[0] if reordered_topics else None
+
+    learner_state = get_learner_state(user_id)
+    last_active_time = learner_state["last_active_time"] if learner_state else None
+    inactive_hours = 0.0
+    short_task = None
+    if last_active_time:
+        last_active_dt = parse_dt(last_active_time)
+        if last_active_dt:
+            inactive_hours = max(0.0, (utc_now() - last_active_dt).total_seconds() / 3600)
+    if inactive_hours >= INACTIVITY_HOURS and next_topic:
+        short_task = build_short_task(next_topic, level, any(normalize_key(next_topic) == normalize_key(item["topic"]) for item in weak_topics))
+
+    skip_topics = [item["topic"] for item in strong_topics if item["score"] > 80]
+    revision_candidates = []
+    conn = get_db()
+    for item in weak_topics[:3]:
+        row = db_fetchone(
+            conn,
+            """SELECT revision_text, trigger_reason, updated_at
+               FROM revision_lessons
+               WHERE user_id = ? AND course_topic = ? AND topic = ? AND level = ?""",
+            (user_id, safe_topic(course_topic), safe_topic(item["topic"]), safe_topic(level)),
+        )
+        if row:
+            revision_candidates.append(
+                {
+                    "topic": item["topic"],
+                    "revision": row["revision_text"],
+                    "trigger_reason": row["trigger_reason"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+    conn.close()
+
+    recommendation_lines = []
+    if alerts:
+        recommendation_lines.append(alerts[0]["message"])
+    if weak_topics:
+        recommendation_lines.append(f"Prioritize weak topics first: {', '.join(item['topic'] for item in weak_topics[:3])}.")
+    elif next_topic:
+        recommendation_lines.append(f"Continue with {next_topic} to maintain momentum.")
+    if skip_topics:
+        recommendation_lines.append(f"Strong topics can be skimmed for now: {', '.join(skip_topics[:3])}.")
+    if short_task:
+        recommendation_lines.append(short_task)
+    if not progress_rows:
+        recommendation_lines.append("Take topic quizzes regularly so the system can detect weak areas and build revision lessons automatically.")
+
+    return {
+        "course_topic": safe_topic(course_topic),
+        "level": safe_topic(level),
+        "next_recommended_step": next_topic,
+        "weak_topics": weak_topics,
+        "moderate_topics": moderate_topics,
+        "strong_topics": strong_topics,
+        "skip_topics": skip_topics,
+        "reordered_topics": reordered_topics,
+        "short_task": short_task,
+        "inactive_hours": round(inactive_hours, 1),
+        "classroom_alerts": alerts,
+        "revision_lessons": revision_candidates,
+        "summary": " ".join(recommendation_lines[:3]).strip(),
+        "classroom_connected": classroom.get("connected", False),
+        "classroom_is_mock": classroom.get("is_mock", False),
+        "classroom_updated_at": classroom.get("updated_at"),
+        "has_progress": bool(progress_rows),
+        "tracking_hint": "Keep taking topic quizzes so the AI can identify weak topics, prioritize revision, and adapt the learning path.",
+    }
+
+
+def trigger_autonomous_updates(user_id: int, course_topic: str, level: str, all_topics: list, use_classroom_data: bool):
+    payload = build_recommendations_payload(user_id, course_topic, level, all_topics, use_classroom_data)
+    for item in payload["weak_topics"][:2]:
+        if float(item["score"]) < 70:
+            ensure_revision_lesson(
+                user_id=user_id,
+                course_topic=course_topic,
+                topic=item["topic"],
+                level=level,
+                trigger_reason="low_topic_score",
+                force=False,
+            )
+    return build_recommendations_payload(user_id, course_topic, level, all_topics, use_classroom_data)
+
+
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 
 def hash_password(password: str) -> str:
@@ -511,16 +1218,26 @@ def get_current_user(session_token: Optional[str]):
     return row
 
 
+def get_current_user_optional(session_token: Optional[str]):
+    try:
+        return get_current_user(session_token)
+    except HTTPException:
+        return None
+
+
 # ── Request Models ────────────────────────────────────────────────────────────
 
 class CourseRequest(BaseModel):
     topic: str
     level: str
+    goal: Optional[str] = "Deep Learning"
+    use_classroom_data: Optional[bool] = False
 
 class LessonRequest(BaseModel):
     topic: str
     module: str
     level: str
+    goal: Optional[str] = "Deep Learning"
 
 class QuizRequest(BaseModel):
     topic: str
@@ -618,6 +1335,43 @@ class FullCourseContentRequest(BaseModel):
     level: str
     course_title: str
     chapters: list
+
+
+class UpdateProgressRequest(BaseModel):
+    course_topic: str
+    topic: str
+    level: str
+    score: float
+    total_questions: Optional[int] = None
+    use_classroom_data: Optional[bool] = False
+    all_topics: Optional[list] = []
+
+
+class RecommendationRequest(BaseModel):
+    course_topic: str
+    level: str
+    all_topics: list
+    use_classroom_data: Optional[bool] = False
+
+
+class ExamModeRequest(BaseModel):
+    topic: str
+    level: str
+    goal: Optional[str] = "Exam Preparation"
+    use_classroom_data: Optional[bool] = False
+    all_topics: Optional[list] = []
+
+
+class ClassroomDataRequest(BaseModel):
+    use_mock: Optional[bool] = True
+    course_topic: Optional[str] = "General Studies"
+
+
+class AutonomousTriggerRequest(BaseModel):
+    course_topic: str
+    level: str
+    all_topics: list
+    use_classroom_data: Optional[bool] = False
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -743,6 +1497,7 @@ def get_progress(topic: str, level: str, kirigumi_session: Optional[str] = Cooki
 @app.put("/profile/progress")
 def save_progress(request: ProgressRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
     user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
     ts = int(datetime.now().timestamp() * 1000)
     conn = get_db()
     db_execute(
@@ -768,6 +1523,7 @@ def get_test_result(topic: str, level: str, kirigumi_session: Optional[str] = Co
 @app.put("/profile/test-result")
 def save_test_result(request: TestResultRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
     user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
     ts = int(datetime.now().timestamp() * 1000)
     conn = get_db()
     db_execute(
@@ -781,44 +1537,118 @@ def save_test_result(request: TestResultRequest, kirigumi_session: Optional[str]
     return {"ok": True}
 
 
+@app.post("/update-progress")
+def update_progress(request: UpdateProgressRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
+    progress = save_user_progress_row(user["id"], request.course_topic, request.topic, request.score)
+    revision = None
+    if float(request.score) < 70:
+        revision = ensure_revision_lesson(
+            user_id=user["id"],
+            course_topic=request.course_topic,
+            topic=request.topic,
+            level=request.level,
+            trigger_reason="quiz_score_below_70",
+            force=True,
+        )
+    recommendations = trigger_autonomous_updates(
+        user_id=user["id"],
+        course_topic=request.course_topic,
+        level=request.level,
+        all_topics=request.all_topics or [request.topic],
+        use_classroom_data=bool(request.use_classroom_data),
+    )
+    return {
+        "ok": True,
+        "progress": progress,
+        "revision_lesson": revision,
+        "recommendations": recommendations,
+    }
+
+
+@app.post("/get-recommendations")
+def get_recommendations(request: RecommendationRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    recommendations = trigger_autonomous_updates(
+        user_id=user["id"],
+        course_topic=request.course_topic,
+        level=request.level,
+        all_topics=request.all_topics,
+        use_classroom_data=bool(request.use_classroom_data),
+    )
+    touch_learner_activity(user["id"])
+    return recommendations
+
+
+@app.post("/run-autonomous-triggers")
+def run_autonomous_triggers(request: AutonomousTriggerRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    recommendations = trigger_autonomous_updates(
+        user_id=user["id"],
+        course_topic=request.course_topic,
+        level=request.level,
+        all_topics=request.all_topics,
+        use_classroom_data=bool(request.use_classroom_data),
+    )
+    touch_learner_activity(user["id"])
+    return {
+        "ok": True,
+        "recommendations": recommendations,
+    }
+
+
+@app.get("/classroom-data")
+def get_classroom_data(kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
+    snapshot = get_classroom_snapshot(user["id"])
+    snapshot["alerts"] = build_classroom_alerts(snapshot.get("assignments", []))
+    return snapshot
+
+
+@app.post("/classroom-data")
+def sync_classroom_data(request: ClassroomDataRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
+    payload = build_mock_classroom_payload(request.course_topic or "General Studies")
+    store_classroom_payload(user["id"], payload, is_mock=bool(request.use_mock))
+    snapshot = get_classroom_snapshot(user["id"])
+    snapshot["alerts"] = build_classroom_alerts(snapshot.get("assignments", []))
+    return snapshot
+
+
 # ── Course generation ─────────────────────────────────────────────────────────
 
 @app.post("/generate-course")
-def generate_course(request: CourseRequest):
-    prompt = f"""
-You are a curriculum designer. Create a complete, well-structured course for the topic below.
-
-Topic: {request.topic}
-Level: {request.level}
-
-Difficulty guideline:
-{difficulty_guide[request.level]}
-
-Rules:
-- Each chapter should have a clear, descriptive title.
-- Each topic inside a chapter should be a short, specific lesson title (under 8 words).
-- Topics within a chapter should flow logically.
-- Do NOT repeat topics across chapters.
-
-Return ONLY valid JSON — no markdown fences, no explanation:
-
-{{
-  "course_title": "<descriptive course title>",
-  "chapters": [
-    {{
-      "chapter": 1,
-      "title": "<chapter title>",
-      "topics": ["Topic 1", "Topic 2", "Topic 3"]
-    }}
-  ]
-}}
-"""
-    return parse_json_object(call_llm(prompt))
+def generate_course(request: CourseRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
+    goal = request.goal if request.goal in goal_guide else "Deep Learning"
+    classroom_context = ""
+    user = get_current_user_optional(kirigumi_session)
+    if user and request.use_classroom_data:
+        classroom = get_classroom_snapshot(user["id"])
+        alerts = build_classroom_alerts(classroom.get("assignments", []))
+        if alerts:
+            classroom_context = "\nUpcoming classroom priorities:\n" + "\n".join(
+                f"- {item['message']}" for item in alerts[:3]
+            )
+    course = generate_course_outline(request.topic, request.level, goal, classroom_context)
+    if user:
+        recommendations = build_recommendations_payload(
+            user_id=user["id"],
+            course_topic=request.topic,
+            level=request.level,
+            all_topics=[item for chapter in course.get("chapters", []) for item in chapter.get("topics", [])],
+            use_classroom_data=bool(request.use_classroom_data),
+        )
+        course["recommendations"] = recommendations
+        touch_learner_activity(user["id"])
+    return course
 
 
 @app.post("/generate-lesson")
 def generate_lesson(request: LessonRequest):
-    return {"lesson": generate_lesson_text(request.topic, request.module, request.level)}
+    return {"lesson": generate_lesson_text(request.topic, request.module, request.level, request.goal or "Deep Learning")}
 
 
 @app.post("/generate-full-course-content")
@@ -1025,6 +1855,90 @@ Rules:
 - Keep total length compact enough to load quickly in a study panel
 """
     return {"revision": call_llm(prompt, max_tokens=1600)}
+
+
+@app.post("/exam-mode")
+def exam_mode(request: ExamModeRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user_optional(kirigumi_session)
+    topic_list = [safe_topic(item) for item in (request.all_topics or []) if safe_topic(item)]
+    if user:
+        touch_learner_activity(user["id"])
+        if not topic_list:
+            conn = get_db()
+            saved = db_fetchone(
+                conn,
+                """SELECT all_topics_json
+                   FROM saved_courses
+                   WHERE user_id = ? AND topic = ? AND level = ?""",
+                (user["id"], safe_topic(request.topic), safe_topic(request.level)),
+            )
+            conn.close()
+            if saved:
+                topic_list = json.loads(saved["all_topics_json"])
+    if not topic_list:
+        topic_list = [safe_topic(request.topic)]
+
+    recommendations = None
+    selected_topics = topic_list[:5]
+    if user:
+        recommendations = build_recommendations_payload(
+            user_id=user["id"],
+            course_topic=request.topic,
+            level=request.level,
+            all_topics=topic_list,
+            use_classroom_data=bool(request.use_classroom_data),
+        )
+        selected_topics = recommendations["reordered_topics"][:5] or selected_topics
+
+    topics_str = "\n".join(f"- {item}" for item in selected_topics)
+    revision_prompt = f"""
+You are in Exam Tomorrow mode.
+
+Course: {request.topic}
+Level: {request.level}
+Goal: Exam Preparation
+Priority topics:
+{topics_str}
+
+Write a compressed, high-yield revision pack.
+
+Rules:
+- Focus on what is most likely to help in the next 24 hours
+- Use short sections with clear memory hooks
+- Highlight weak areas first if any
+- Include likely exam traps and rapid recall bullets
+- No markdown fences
+- Keep it under 500 words
+"""
+    quiz_prompt = f"""
+You are in Exam Tomorrow mode.
+
+Course: {request.topic}
+Level: {request.level}
+Priority topics:
+{topics_str}
+
+Generate exactly 5 quick exam-focused multiple-choice questions.
+
+Use this exact format:
+1. [TOPIC: <topic>] <Question text>
+A) <Option>
+B) <Option>
+C) <Option>
+D) <Option>
+Answer: <single letter>
+
+Rules:
+- High-yield only
+- Mix recall and application
+- No preamble
+"""
+    return {
+        "selected_topics": selected_topics,
+        "recommendations": recommendations,
+        "revision": call_llm(revision_prompt, max_tokens=900),
+        "quiz": call_llm(quiz_prompt, max_tokens=1200),
+    }
 
 
 @app.post("/generate-notes")

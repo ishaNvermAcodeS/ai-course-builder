@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import axios from "axios";
 
 const API_HOST =
@@ -139,6 +140,34 @@ async function saveTestResult(topic, level, result) {
     level,
     result,
   });
+}
+
+async function updateMasteryProgress(payload) {
+  const res = await axios.post(`${API_BASE}/update-progress`, payload);
+  return res.data;
+}
+
+async function loadRecommendations(payload) {
+  const res = await axios.post(`${API_BASE}/get-recommendations`, payload);
+  return res.data;
+}
+
+async function loadClassroomData() {
+  const res = await axios.get(`${API_BASE}/classroom-data`);
+  return res.data;
+}
+
+async function connectClassroom(topic) {
+  const res = await axios.post(`${API_BASE}/classroom-data`, {
+    use_mock: true,
+    course_topic: topic || "General Studies",
+  });
+  return res.data;
+}
+
+async function runExamMode(payload) {
+  const res = await axios.post(`${API_BASE}/exam-mode`, payload);
+  return res.data;
 }
 
 async function loadSession() {
@@ -609,7 +638,10 @@ const TOOL_MODAL_PANEL_STYLE = {
 };
 
 function ToolModalShell({ children, onClose, wide = false }) {
-  return (
+  useScrollLock();
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={TOOL_MODAL_OVERLAY_STYLE}
@@ -622,7 +654,8 @@ function ToolModalShell({ children, onClose, wide = false }) {
       >
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -651,7 +684,7 @@ function StartupLoadingOverlay() {
             <span className="startup-clock-center" />
           </div>
         </div>
-        <div className="startup-title">Please wait fo sometime Do not refresh or leave</div>
+        <div className="startup-title">Please wait for sometime Do not refresh or leave</div>
         <div className="startup-message-wrap">
           {STARTUP_LOADING_MESSAGES.map((message, index) => (
             <p
@@ -894,7 +927,227 @@ function NotesPanel({ courseTopic, level, allTopics, onClose }) {
   );
 }
 
-function CourseBottomActions({ courseTopic, level, allTopics }) {
+function RecommendationPanel({ recommendations, classroomData, onConnectClassroom, classroomLoading, onOpenTopic, onOpenRevisionTopic, onOpenExamMode, hideClassroom = false }) {
+  const weakTopics = recommendations?.weak_topics || [];
+  const alerts = recommendations?.classroom_alerts?.length ? recommendations.classroom_alerts : (classroomData?.alerts || []);
+  const priorityPath = recommendations?.reordered_topics?.slice(0, 5) || [];
+  const revisionLessons = recommendations?.revision_lessons || [];
+  const nextTopic = recommendations?.next_recommended_step || "";
+
+  return (
+    <div className="rec-panel">
+      <div className="rec-header">
+        <div>
+          <div className="rec-eyebrow">Autonomous Guidance</div>
+          <h3 className="rec-title">Next Recommended Step</h3>
+        </div>
+        <div className="rec-next-pill">{recommendations?.next_recommended_step || "Generate a course to begin"}</div>
+      </div>
+      {recommendations?.summary && <p className="rec-summary">{recommendations.summary}</p>}
+      <div className="rec-actions-row">
+        <button className="rec-primary-btn" onClick={() => nextTopic && onOpenTopic?.(nextTopic)} disabled={!nextTopic}>Open Recommended Topic</button>
+        <button className="rec-secondary-btn" onClick={onOpenExamMode}>Exam Tomorrow?</button>
+      </div>
+      <div className="rec-grid">
+        <div className="rec-card">
+          <div className="rec-card-label">Weak Topics</div>
+          {weakTopics.length > 0
+            ? weakTopics.map((item) => (
+                <div key={item.topic} className="rec-chip-row">
+                  <span>{item.topic}</span>
+                  <div className="rec-chip-actions">
+                    <strong>{Math.round(item.score)}%</strong>
+                    <button className="rec-mini-btn" onClick={() => onOpenTopic?.(item.topic)}>Open</button>
+                  </div>
+                </div>
+              ))
+            : <div className="rec-empty">Weak topics will appear after topic quiz activity. Keep attempting quizzes so the AI can identify what needs revision.</div>}
+        </div>
+        <div className="rec-card">
+          <div className="rec-card-label">Priority Path</div>
+          {priorityPath.length > 0
+            ? priorityPath.map((item, index) => (
+              <div key={item} className="rec-line">
+                <span>{index + 1}. {item}</span>
+                <button className="rec-mini-btn" onClick={() => onOpenTopic?.(item)}>Go</button>
+              </div>
+            ))
+            : <div className="rec-empty">No reordered path yet.</div>}
+        </div>
+        <div className="rec-card">
+          <div className="rec-card-label">Behavior Trigger</div>
+          {recommendations?.short_task
+            ? <div className="rec-line">{recommendations.short_task}</div>
+            : <div className="rec-empty">Short tasks appear after about 24 hours of inactivity and point you to the next best quick study action.</div>}
+        </div>
+        {!hideClassroom && (
+          <div className="rec-card">
+            <div className="rec-card-label">Classroom Deadlines</div>
+            {classroomData?.connected
+              ? (
+                <>
+                  <div className="rec-line">{classroomData.is_mock ? "Mock classroom connected" : "Google Classroom connected"}</div>
+                  {alerts.length > 0
+                    ? alerts.slice(0, 2).map((alert) => <div key={`${alert.assignment}-${alert.days_until_due}`} className="rec-alert">{alert.message}</div>)
+                    : <div className="rec-empty">No urgent deadlines right now.</div>}
+                </>
+              )
+              : (
+                <>
+                  <div className="rec-empty">Connect Classroom to prioritize deadlines automatically.</div>
+                  <button className="rec-connect-btn" onClick={onConnectClassroom} disabled={classroomLoading}>
+                    {classroomLoading ? "Connecting…" : "Connect Google Classroom"}
+                  </button>
+                </>
+              )}
+          </div>
+        )}
+        <div className="rec-card rec-card-wide">
+          <div className="rec-card-label">Autonomous Revision Queue</div>
+          {revisionLessons.length > 0
+            ? revisionLessons.map((item) => (
+              <div key={`${item.topic}-${item.updated_at}`} className="rec-revision-row">
+                <div>
+                  <div className="rec-revision-title">{item.topic}</div>
+                  <div className="rec-revision-sub">{item.trigger_reason === "quiz_score_below_70" ? "Triggered by low quiz score" : "Triggered by weak mastery"}</div>
+                </div>
+                <button className="rec-mini-btn" onClick={() => onOpenRevisionTopic?.(item.topic)}>Review</button>
+              </div>
+            ))
+            : <div className="rec-empty">Revision lessons will appear here when weak areas are detected from quiz performance. Keep giving topic quizzes so the AI can learn what to revisit.</div>}
+        </div>
+        <div className="rec-card rec-card-wide">
+          <div className="rec-card-label">Tracking Note</div>
+          <div className="rec-line">{recommendations?.tracking_hint || "Keep taking topic quizzes so the AI can detect weak topics, adapt your path, and generate targeted revision."}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ExamModePanel({ courseTopic, level, allTopics, goal, useClassroomData, onClose }) {
+  const [loading, setLoading] = useState(true);
+  const [payload, setPayload] = useState(null);
+  const [error, setError] = useState("");
+  const [examSelected, setExamSelected] = useState({});
+  const [examChecked, setExamChecked] = useState({});
+  const [examFinished, setExamFinished] = useState(false);
+  const bodyRef = usePanelScrollTop(loading);
+
+  useEffect(() => {
+    const exec = async () => {
+      try {
+        const res = await runExamMode({
+          topic: courseTopic,
+          level,
+          goal,
+          use_classroom_data: useClassroomData,
+          all_topics: allTopics,
+        });
+        setPayload(res);
+        setError("");
+      } catch (e) {
+        console.error(e);
+        setError(getErrorMessage(e, "Could not build Exam Tomorrow mode right now."));
+      } finally {
+        setLoading(false);
+      }
+    };
+    exec();
+    const h = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [courseTopic, level, allTopics, goal, useClassroomData, onClose]);
+
+  const quickQuestions = parseQuizText(payload?.quiz || "");
+  const examScore = examFinished ? Object.entries(examChecked).filter(([idx]) => examSelected[idx] === quickQuestions[idx]?.correctLetter).length : 0;
+
+  const handleExamCheck = (qIdx) => {
+    if (examChecked[qIdx]) return;
+    setExamChecked(prev => ({ ...prev, [qIdx]: true }));
+    const allDone = quickQuestions.length > 0 && quickQuestions.every((_, i) => i === qIdx || examChecked[i]);
+    if (allDone) setExamFinished(true);
+  };
+
+  return (
+    <ToolModalShell onClose={onClose} wide>
+      <div style={{ display: "flex", flexDirection: "column", minHeight: "min(88vh, 920px)", maxHeight: "min(88vh, 920px)" }}>
+        <div className="mode-header">
+          <div>
+            <span className="mode-eyebrow">Exam Tomorrow?</span>
+            <h2 className="mode-title">{courseTopic}</h2>
+            <span className="mode-subtitle">Compressed revision for the next 24 hours</span>
+          </div>
+          <button className="qm-close-btn" onClick={onClose}>✕</button>
+        </div>
+        <div className="mode-body" ref={bodyRef}>
+          {loading
+            ? <CinematicLoader label="Compressing the highest-yield topics…" sublabel="Focusing weak areas and deadlines" />
+            : error
+              ? <div className="mode-empty">{error}</div>
+              : (
+                <div className="exam-mode-wrap">
+                  <div className="exam-priority-list">
+                    <div className="exam-block-title">Priority Topics</div>
+                    <div className="exam-chip-list">
+                      {(payload?.selected_topics || []).map((item) => <span key={item} className="exam-chip">{item}</span>)}
+                    </div>
+                  </div>
+                  <div className="exam-revision-card">
+                    <div className="exam-block-title">Rapid Revision Pack</div>
+                    <LessonText text={payload?.revision || ""} />
+                  </div>
+                  <div className="exam-quiz-card">
+                    <div className="exam-block-title">Quick Quiz {examFinished && <span style={{ color: "var(--green)", fontSize: ".85rem", marginLeft: 10 }}>Score: {examScore}/{quickQuestions.length}</span>}</div>
+                    <div className="qm-questions" style={{ gap: 14 }}>
+                      {quickQuestions.map((q, qIdx) => {
+                        const isSub = !!examChecked[qIdx];
+                        const userAns = examSelected[qIdx];
+                        const isCorrect = userAns === q.correctLetter;
+                        const correctOpt = q.options.find(o => o.letter === q.correctLetter);
+                        return (
+                          <div key={`${q.question}-${qIdx}`} className={`qm-question ${isSub ? (isCorrect ? "qm-q-correct" : "qm-q-wrong") : ""}`}>
+                            <div className="qm-q-top">
+                              <span className="qm-q-num">{String(qIdx + 1).padStart(2, "0")}</span>
+                              <div className="qm-q-right">
+                                {q.topic && <span className="fct-q-topic">{q.topic}</span>}
+                                <span className="qm-q-text">{q.question}</span>
+                              </div>
+                              {isSub && <span className={`qm-q-badge ${isCorrect ? "qb-correct" : "qb-wrong"}`}>{isCorrect ? "✓" : "✗"}</span>}
+                            </div>
+                            <div className="qm-opts">
+                              {q.options.map(opt => {
+                                const isSel = userAns === opt.letter;
+                                const isOptCorrect = opt.letter === q.correctLetter;
+                                let cls = "qm-opt";
+                                if (!isSub && isSel) cls += " qo-selected";
+                                if (isSub) { if (isOptCorrect) cls += " qo-correct"; else if (isSel) cls += " qo-wrong"; else cls += " qo-dim"; }
+                                return (
+                                  <button key={opt.letter} className={cls} onClick={() => { if (!examChecked[qIdx]) setExamSelected(p => ({ ...p, [qIdx]: opt.letter })); }} disabled={isSub}>
+                                    <span className="qo-letter">{opt.letter}</span>
+                                    <span className="qo-text">{opt.text}</span>
+                                    {isSub && isOptCorrect && <span className="qo-icon qo-icon-ok">✓</span>}
+                                    {isSub && isSel && !isOptCorrect && <span className="qo-icon qo-icon-bad">✗</span>}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            {!isSub && <button className="qm-check-btn" onClick={() => handleExamCheck(qIdx)} disabled={!examSelected[qIdx]}>Check Answer</button>}
+                            {isSub && !isCorrect && <div className="qe-top" style={{ marginTop: 8 }}><span className="qe-result-label">{`✗ Correct: ${q.correctLetter}) ${correctOpt?.text || ""}`}</span></div>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+        </div>
+      </div>
+    </ToolModalShell>
+  );
+}
+
+function CourseBottomActions({ courseTopic, level, allTopics, goal, useClassroomData }) {
   const [show, setShow] = useState(null);
   return (
     <>
@@ -904,11 +1157,13 @@ function CourseBottomActions({ courseTopic, level, allTopics }) {
           <button className="cba-btn cba-practice" onClick={() => setShow("practice")}><span className="cba-btn-icon">✏️</span><div className="cba-btn-text"><span className="cba-btn-label">Practice</span><span className="cba-btn-sub">10 exam-style questions</span></div></button>
           <button className="cba-btn cba-revise" onClick={() => setShow("revision")}><span className="cba-btn-icon">📖</span><div className="cba-btn-text"><span className="cba-btn-label">Revise</span><span className="cba-btn-sub">Full course summary</span></div></button>
           <button className="cba-btn cba-notes" onClick={() => setShow("notes")}><span className="cba-btn-icon">🤖</span><div className="cba-btn-text"><span className="cba-btn-label">AI Notes</span><span className="cba-btn-sub">Crisp structured notes</span></div></button>
+          <button className="cba-btn cba-exam" onClick={() => setShow("exam")}><span className="cba-btn-icon">⏰</span><div className="cba-btn-text"><span className="cba-btn-label">Exam Tomorrow?</span><span className="cba-btn-sub">High-yield revision sprint</span></div></button>
         </div>
       </div>
       {show === "practice" && <PracticePanel courseTopic={courseTopic} level={level} allTopics={allTopics} onClose={() => setShow(null)} />}
       {show === "revision" && <RevisionPanel courseTopic={courseTopic} level={level} allTopics={allTopics} onClose={() => setShow(null)} />}
       {show === "notes" && <NotesPanel courseTopic={courseTopic} level={level} allTopics={allTopics} onClose={() => setShow(null)} />}
+      {show === "exam" && <ExamModePanel courseTopic={courseTopic} level={level} allTopics={allTopics} goal={goal} useClassroomData={useClassroomData} onClose={() => setShow(null)} />}
     </>
   );
 }
@@ -1121,13 +1376,11 @@ function AdaptiveReportCard({ report, loading, score, total, onClose }) {
 }
 
 // ─── Quiz Modal ───────────────────────────────────────────────────────────────
-function QuizModal({ rawQuiz, moduleName, courseTopic, level, allTopics, onClose, onGenerateMore, generating, onRevisitLesson }) {
+function QuizModal({ rawQuiz, moduleName, courseTopic, level, allTopics, onClose, onGenerateMore, generating, onRevisitLesson, currentUser, useClassroomData, onRecommendationsUpdate }) {
   useScrollLock();
   const [questions, setQuestions] = useState([]);
   const [selected, setSelected] = useState({});
   const [submitted, setSubmitted] = useState({});
-  const [explanations, setExplanations] = useState({});
-  const [expLoading, setExpLoading] = useState({});
   const [score, setScore] = useState(null);
   const [finished, setFinished] = useState(false);
   const [adaptiveReport, setAdaptiveReport] = useState(null);
@@ -1136,7 +1389,7 @@ function QuizModal({ rawQuiz, moduleName, courseTopic, level, allTopics, onClose
 
   useEffect(() => {
     setQuestions(parseQuizText(rawQuiz));
-    setSelected({}); setSubmitted({}); setExplanations({}); setExpLoading({});
+    setSelected({}); setSubmitted({});
     setScore(null); setFinished(false); setAdaptiveReport(null);
   }, [rawQuiz]);
 
@@ -1146,17 +1399,6 @@ function QuizModal({ rawQuiz, moduleName, courseTopic, level, allTopics, onClose
     return () => window.removeEventListener("keydown", h);
   }, [onClose]);
 
-  const handleCheck = async (qIdx) => {
-    if (!selected[qIdx] || submitted[qIdx]) return;
-    setSubmitted(prev => ({ ...prev, [qIdx]: true }));
-    const q = questions[qIdx];
-    const correctOpt = q.options.find(o => o.letter === q.correctLetter);
-    setExpLoading(prev => ({ ...prev, [qIdx]: true }));
-    const explanation = await fetchExplanation({ question: q.question, userAnswer: selected[qIdx], correctAnswer: q.correctLetter, correctText: correctOpt?.text || "", moduleName, courseTopic, level });
-    setExplanations(prev => ({ ...prev, [qIdx]: explanation }));
-    setExpLoading(prev => ({ ...prev, [qIdx]: false }));
-  };
-
   const handleFinish = async () => {
     let correct = 0;
     const results = questions.map((q, i) => {
@@ -1165,22 +1407,34 @@ function QuizModal({ rawQuiz, moduleName, courseTopic, level, allTopics, onClose
       const correctOpt = q.options.find(o => o.letter === q.correctLetter);
       return { idx: i, question: q.question, userAnswer: selected[i] || "?", correctAnswer: q.correctLetter, correctText: correctOpt?.text || "", correct: isCorrect };
     });
+    setSubmitted(Object.fromEntries(questions.map((_, i) => [i, true])));
     setScore(correct); setFinished(true);
     if (bodyRef.current) bodyRef.current.scrollTop = 0;
     setReportLoading(true);
     const report = await fetchAdaptiveReport({ questions, results, moduleName, courseTopic, level, allTopics });
+    if (currentUser) {
+      try {
+        const progressUpdate = await updateMasteryProgress({
+          course_topic: courseTopic,
+          topic: moduleName,
+          level,
+          score: questions.length ? (correct / questions.length) * 100 : 0,
+          total_questions: questions.length,
+          use_classroom_data: useClassroomData,
+          all_topics: allTopics,
+        });
+        onRecommendationsUpdate?.(progressUpdate.recommendations, progressUpdate.revision_lesson || null);
+      } catch (e) {
+        console.error(e);
+      }
+    }
     setAdaptiveReport(report); setReportLoading(false);
   };
 
-  const handleReset = () => {
-    setSelected({}); setSubmitted({}); setExplanations({}); setExpLoading({});
-    setScore(null); setFinished(false); setAdaptiveReport(null);
-    if (bodyRef.current) bodyRef.current.scrollTop = 0;
-  };
-
-  const submittedCount = Object.keys(submitted).length;
-  const wrongCount = Object.entries(submitted).filter(([idx]) => selected[idx] !== questions[idx]?.correctLetter).length;
-  const allAnswered = questions.length > 0 && questions.every((_, i) => submitted[i]);
+  const answeredCount = Object.keys(selected).length;
+  const submittedCount = finished ? questions.length : answeredCount;
+  const wrongCount = finished ? questions.filter((q, idx) => selected[idx] !== q.correctLetter).length : 0;
+  const allAnswered = questions.length > 0 && questions.every((_, i) => !!selected[i]);
   const pct = questions.length ? (submittedCount / questions.length) * 100 : 0;
 
   return (
@@ -1190,22 +1444,20 @@ function QuizModal({ rawQuiz, moduleName, courseTopic, level, allTopics, onClose
           <div className="qm-header-left"><span className="qm-eyebrow">Quiz · Adaptive</span><h2 className="qm-title">{moduleName}</h2></div>
           <div className="qm-header-actions">
             <button className="qm-more-btn" onClick={onGenerateMore} disabled={generating}>{generating ? <><span className="spin spin-sm spin-accent" /> Generating…</> : "New Questions ↻"}</button>
-            <button className="qm-reset-btn" onClick={handleReset}>Reset ↺</button>
             <button className="qm-close-btn" onClick={onClose}>✕</button>
           </div>
         </div>
         <div className="qm-prog">
           <div className="qm-prog-bar" style={{ width: `${pct}%` }} />
-          <div className="qm-prog-meta"><span>{submittedCount}/{questions.length} answered</span>{submittedCount > 0 && <span style={{ color: wrongCount > submittedCount / 2 ? "var(--red)" : "var(--green)" }}>{submittedCount - wrongCount} correct · {wrongCount} wrong</span>}</div>
+          <div className="qm-prog-meta"><span>{submittedCount}/{questions.length} answered</span>{finished && submittedCount > 0 && <span style={{ color: wrongCount > submittedCount / 2 ? "var(--red)" : "var(--green)" }}>{submittedCount - wrongCount} correct · {wrongCount} wrong</span>}</div>
         </div>
         <div className="qm-body" ref={bodyRef}>
-          {!finished && submittedCount > 0 && <AdaptiveAlert wrongCount={wrongCount} total={submittedCount} onRevisit={() => { onClose(); onRevisitLesson?.(); }} />}
           {finished && <AdaptiveReportCard report={adaptiveReport} loading={reportLoading} score={score} total={questions.length} onClose={() => setAdaptiveReport(null)} />}
-          {finished && score !== null && !reportLoading && (<div className={`qm-score-banner ${score === questions.length ? "sb-perfect" : score >= Math.ceil(questions.length / 2) ? "sb-pass" : "sb-fail"}`}><span className="sb-emoji">{score === questions.length ? "🏆" : score >= Math.ceil(questions.length / 2) ? "✓" : "↻"}</span><div className="sb-text"><span className="sb-main">{score}/{questions.length} Correct</span><span className="sb-sub">{score === questions.length ? "Perfect!" : score >= Math.ceil(questions.length / 2) ? "Good job!" : "Keep studying!"}</span></div><button className="sb-retry" onClick={handleReset}>Try Again</button></div>)}
+          {finished && score !== null && !reportLoading && (<div className={`qm-score-banner ${score === questions.length ? "sb-perfect" : score >= Math.ceil(questions.length / 2) ? "sb-pass" : "sb-fail"}`}><span className="sb-emoji">{score === questions.length ? "🏆" : score >= Math.ceil(questions.length / 2) ? "✓" : "↻"}</span><div className="sb-text"><span className="sb-main">{score}/{questions.length} Correct</span><span className="sb-sub">{score === questions.length ? "Perfect!" : score >= Math.ceil(questions.length / 2) ? "Good job!" : "Keep studying!"}</span></div></div>)}
           <div className="qm-questions" style={{ marginTop: finished ? 16 : 0 }}>
             {questions.map((q, qIdx) => {
               const isSub = !!submitted[qIdx]; const userAns = selected[qIdx]; const correctOpt = q.options.find(o => o.letter === q.correctLetter); const isCorrect = userAns === q.correctLetter;
-              return (<div key={qIdx} className={`qm-question ${isSub ? (isCorrect ? "qm-q-correct" : "qm-q-wrong") : ""}`} style={{ animationDelay: `${qIdx * 0.05}s` }}><div className="qm-q-top"><span className="qm-q-num">{String(qIdx + 1).padStart(2, "0")}</span><span className="qm-q-text">{q.question}</span>{isSub && <span className={`qm-q-badge ${isCorrect ? "qb-correct" : "qb-wrong"}`}>{isCorrect ? "✓ Correct" : "✗ Wrong"}</span>}</div><div className="qm-opts">{q.options.map(opt => { const isSel = userAns === opt.letter; const isOptCorrect = opt.letter === q.correctLetter; let cls = "qm-opt"; if (!isSub && isSel) cls += " qo-selected"; if (isSub) { if (isOptCorrect) cls += " qo-correct"; else if (isSel) cls += " qo-wrong"; else cls += " qo-dim"; } return (<button key={opt.letter} className={cls} onClick={() => { if (!submitted[qIdx]) setSelected(p => ({ ...p, [qIdx]: opt.letter })); }} disabled={isSub}><span className="qo-letter">{opt.letter}</span><span className="qo-text">{opt.text}</span>{isSub && isOptCorrect && <span className="qo-icon qo-icon-ok">✓</span>}{isSub && isSel && !isOptCorrect && <span className="qo-icon qo-icon-bad">✗</span>}</button>); })}</div>{!isSub && <button className="qm-check-btn" onClick={() => handleCheck(qIdx)} disabled={!selected[qIdx]}>Check Answer</button>}{isSub && (<div className={`qm-explanation ${isCorrect ? "qe-correct" : "qe-wrong"}`}><div className="qe-top"><span className="qe-result-label">{isCorrect ? "✓ Correct" : `✗ Incorrect — answer: ${q.correctLetter}) ${correctOpt?.text || q.correctLetter}`}</span>{!isCorrect && <button className="qe-revisit-btn" onClick={() => { onClose(); onRevisitLesson?.(); }}>Revisit Lesson ↩</button>}</div><div className="qe-body">{expLoading[qIdx] ? <div className="qe-loading"><span className="spin spin-sm" style={{ borderTopColor: isCorrect ? "var(--green)" : "var(--red)" }} /><span>Generating explanation…</span></div> : explanations[qIdx] ? <p className="qe-text">{explanations[qIdx]}</p> : <p className="qe-text qe-fallback">{isCorrect ? "Great work!" : `Review the "${moduleName}" lesson.`}</p>}</div></div>)}</div>);
+              return (<div key={qIdx} className={`qm-question ${isSub ? (isCorrect ? "qm-q-correct" : "qm-q-wrong") : ""}`} style={{ animationDelay: `${qIdx * 0.05}s` }}><div className="qm-q-top"><span className="qm-q-num">{String(qIdx + 1).padStart(2, "0")}</span><span className="qm-q-text">{q.question}</span>{isSub && <span className={`qm-q-badge ${isCorrect ? "qb-correct" : "qb-wrong"}`}>{isCorrect ? "✓ Correct" : "✗ Wrong"}</span>}</div><div className="qm-opts">{q.options.map(opt => { const isSel = userAns === opt.letter; const isOptCorrect = opt.letter === q.correctLetter; let cls = "qm-opt"; if (!isSub && isSel) cls += " qo-selected"; if (isSub) { if (isOptCorrect) cls += " qo-correct"; else if (isSel) cls += " qo-wrong"; else cls += " qo-dim"; } return (<button key={opt.letter} className={cls} onClick={() => { if (!finished) setSelected(p => ({ ...p, [qIdx]: opt.letter })); }} disabled={finished}><span className="qo-letter">{opt.letter}</span><span className="qo-text">{opt.text}</span>{isSub && isOptCorrect && <span className="qo-icon qo-icon-ok">✓</span>}{isSub && isSel && !isOptCorrect && <span className="qo-icon qo-icon-bad">✗</span>}</button>); })}</div>{isSub && (<div className={`qm-explanation ${isCorrect ? "qe-correct" : "qe-wrong"}`}><div className="qe-top"><span className="qe-result-label">{isCorrect ? "✓ Correct" : `✗ Incorrect — answer: ${q.correctLetter}) ${correctOpt?.text || q.correctLetter}`}</span>{!isCorrect && <button className="qe-revisit-btn" onClick={() => { onClose(); onRevisitLesson?.(); }}>Revisit Lesson ↩</button>}</div><div className="qe-body"><p className="qe-text qe-fallback">{isCorrect ? "Great work!" : `Review the "${moduleName}" lesson.`}</p></div></div>)}</div>);
             })}
           </div>
         </div>
@@ -1216,20 +1468,85 @@ function QuizModal({ rawQuiz, moduleName, courseTopic, level, allTopics, onClose
 }
 
 // ─── Compact Bar ──────────────────────────────────────────────────────────────
-function CompactBar({ topic, setTopic, level, setLevel, onGenerate, loading, onProfileOpen, profileCount, darkMode, onToggleDark }) {
+function ClassroomStatusWidget({ visible, onShowNotifications, disclaimerOpen, onToggleDisclaimer }) {
+  if (!visible) return null;
+  return (
+    <div className="classroom-status-wrap">
+      <button className="classroom-status-pill classroom-status-pill-btn" onClick={onShowNotifications}>Google Classroom Connected</button>
+      <button className="classroom-status-info-btn" onClick={onToggleDisclaimer}>Mock</button>
+      {disclaimerOpen && <div className="classroom-status-disclaimer">This is a mock Google Classroom for showing the concept. Real Classroom will be connected soon.</div>}
+    </div>
+  );
+}
+
+function ThemeToggle({ darkMode, onToggle }) {
+  return (
+    <button className="theme-toggle-btn" onClick={onToggle} title={darkMode ? "Switch to light mode" : "Switch to dark mode"}>
+      <span>{darkMode ? "Light" : "Dark"}</span>
+    </button>
+  );
+}
+
+function ClassroomLiveToasts({ alerts, visible, resetKey }) {
+  const [items, setItems] = useState([]);
+
+  useEffect(() => {
+    if (!visible) {
+      setItems([]);
+      return;
+    }
+    const source = alerts?.length
+      ? alerts.map((alert, index) => ({ id: `${alert.assignment || "alert"}-${index}`, message: alert.message }))
+      : [
+          { id: "fake-deadline", message: "Assignment deadline approaching. Your DSA worksheet is due in 2 days." },
+          { id: "fake-exam", message: "Exam reminder. Your Set Theory exam may be in 3 days." },
+          { id: "fake-assignment", message: "New study reminder. Please revise Linked Lists tonight." },
+        ];
+    setItems(source);
+  }, [alerts, visible, resetKey]);
+
+  useEffect(() => {
+    if (!items.length) return;
+    const timers = items.map((item, index) => setTimeout(() => {
+      setItems((prev) => prev.filter((entry) => entry.id !== item.id));
+    }, 6500 + (index * 1200)));
+    return () => timers.forEach(clearTimeout);
+  }, [items]);
+
+  if (!visible || !items.length) return null;
+  return (
+    <div className="classroom-live-toasts">
+      {items.map((item) => (
+        <div key={item.id} className="classroom-live-toast">
+          <div className="classroom-live-toast-title">Google Classroom</div>
+          <div className="classroom-live-toast-text">{item.message}</div>
+          <button className="classroom-live-toast-close" onClick={() => setItems((prev) => prev.filter((entry) => entry.id !== item.id))}>✕</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CompactBar({ topic, setTopic, level, setLevel, goal, setGoal, useClassroomData, setUseClassroomData, classroomConnected, onConnectClassroom, classroomLoading, onGenerate, loading, onProfileOpen, profileCount, showClassroomStatus, darkMode, onToggleTheme, onGoHome, onShowNotifications, disclaimerOpen, onToggleDisclaimer }) {
   return (
     <div className="compact-bar">
       <div className="compact-inner">
-        {/* KIRIGUMI logo — top-left, moderate size */}
-        <div className="compact-logo-kiri">KIRIGUMI</div>
-        <input className="compact-input" value={topic} onChange={e => setTopic(e.target.value)} onKeyDown={e => e.key === "Enter" && onGenerate()} placeholder="New topic…" />
+        <button className="compact-logo-kiri compact-logo-btn" onClick={onGoHome}>KIRIGUMI</button>
+        <input className="compact-input" value={topic} onChange={e => setTopic(e.target.value)} onKeyDown={e => e.key === "Enter" && onGenerate()} placeholder="What do you want to learn?" />
+        <select className="compact-select" value={goal} onChange={e => setGoal(e.target.value)}>
+          <option>Exam Preparation</option><option>Deep Learning</option><option>Quick Revision</option>
+        </select>
         <select className="compact-select" value={level} onChange={e => setLevel(e.target.value)}>
           <option>Beginner</option><option>Intermediate</option><option>Advanced</option>
         </select>
-        <button className="compact-btn" onClick={onGenerate} disabled={loading || !topic.trim()}>{loading ? <span className="spin spin-dark" /> : "→"}</button>
-        <button className="theme-toggle" onClick={onToggleDark} title={darkMode ? "Switch to light mode" : "Switch to dark mode"}>
-          {darkMode ? "☀" : "🌙"}
-        </button>
+        <label className="classroom-toggle">
+          <input type="checkbox" checked={useClassroomData && classroomConnected} onChange={e => setUseClassroomData(e.target.checked)} disabled={!classroomConnected} />
+          <span>Use Classroom Data</span>
+        </label>
+        {!classroomConnected && <button className="classroom-connect-btn compact-classroom-btn" onClick={onConnectClassroom} disabled={classroomLoading}>{classroomLoading ? "Connecting…" : "Connect Classroom"}</button>}
+        <button className="compact-generate-btn" onClick={onGenerate} disabled={loading || !topic.trim()}>{loading ? <span className="spin spin-white" /> : "Build Course"}</button>
+        <ClassroomStatusWidget visible={showClassroomStatus} onShowNotifications={onShowNotifications} disclaimerOpen={disclaimerOpen} onToggleDisclaimer={onToggleDisclaimer} />
+        <ThemeToggle darkMode={darkMode} onToggle={onToggleTheme} />
         <button className="navbar-profile compact-profile" onClick={onProfileOpen} title="My Profile">
           <span className="navbar-profile-ring" />
           {profileCount > 0 && <span className="navbar-badge">{profileCount}</span>}
@@ -1239,54 +1556,15 @@ function CompactBar({ topic, setTopic, level, setLevel, onGenerate, loading, onP
   );
 }
 
-function HeroAnimatedText() {
-  const [index, setIndex] = useState(0);
-  const phrase = HERO_TEXT_LOOPS[index];
-  const { displayed, done } = useTypewriter(phrase, 24, false);
-
-  useEffect(() => {
-    if (!done) return;
-    const timer = setTimeout(() => {
-      setIndex((prev) => (prev + 1) % HERO_TEXT_LOOPS.length);
-    }, 1800);
-    return () => clearTimeout(timer);
-  }, [done]);
-
-  return (
-    <div className="hero-motion-wrap hero-float hero-float-4">
-      <div className="hero-motion-chip">
-        <span className="hero-motion-label">KIRIGUMI Flow</span>
-        <span className="hero-motion-text">{displayed}{!done && <span className="cursor-blink">▌</span>}</span>
-      </div>
-      <div className="hero-marquee" aria-hidden="true">
-        <div className="hero-marquee-track">
-          <span>Build curriculum</span>
-          <span>Study deeply</span>
-          <span>Practice actively</span>
-          <span>Revise faster</span>
-          <span>Measure mastery</span>
-          <span>Build curriculum</span>
-          <span>Study deeply</span>
-          <span>Practice actively</span>
-          <span>Revise faster</span>
-          <span>Measure mastery</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── Hero Input ───────────────────────────────────────────────────────────────
-function HeroInput({ topic, setTopic, level, setLevel, onGenerate, loading, onProfileOpen, profileCount, darkMode, onToggleDark }) {
+function HeroInput({ topic, setTopic, level, setLevel, goal, setGoal, useClassroomData, setUseClassroomData, classroomConnected, onConnectClassroom, classroomLoading, onGenerate, loading, onProfileOpen, profileCount, generateError, showClassroomStatus, darkMode, onToggleTheme, onGoHome, onShowNotifications, disclaimerOpen, onToggleDisclaimer }) {
   return (
     <div className="hero-wrap">
-      {/* Navbar: logo top-left, controls top-right */}
       <nav className="navbar">
-        <div className="navbar-kiri-logo">KIRIGUMI</div>
+        <button className="navbar-kiri-logo navbar-kiri-btn" onClick={onGoHome}>KIRIGUMI</button>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <button className="theme-toggle" onClick={onToggleDark} title={darkMode ? "Switch to light" : "Switch to dark"}>
-            {darkMode ? "☀" : "🌙"}
-          </button>
+          <ClassroomStatusWidget visible={showClassroomStatus} onShowNotifications={onShowNotifications} disclaimerOpen={disclaimerOpen} onToggleDisclaimer={onToggleDisclaimer} />
+          <ThemeToggle darkMode={darkMode} onToggle={onToggleTheme} />
           <button className="navbar-profile" onClick={onProfileOpen} title="My Profile">
             <span className="navbar-profile-ring" />
             {profileCount > 0 && <span className="navbar-badge">{profileCount}</span>}
@@ -1294,49 +1572,51 @@ function HeroInput({ topic, setTopic, level, setLevel, onGenerate, loading, onPr
         </div>
       </nav>
 
-      <div className="hero-blob hero-blob-1" /><div className="hero-blob hero-blob-2" /><div className="hero-blob hero-blob-3" />
+      <div className="hero-blob hero-blob-1" /><div className="hero-blob hero-blob-2" />
 
       <div className="hero-center">
-        {/* Logo icon centred above the wordmark */}
-        <div className="hero-logo-icon" aria-label="Kirigumi logo">
-          <svg viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" className="hero-logo-svg">
-            <circle cx="40" cy="40" r="8" fill="none" stroke="var(--logo-blue)" strokeWidth="6"/>
-            <circle cx="40" cy="16" r="8" fill="none" stroke="var(--logo-blue)" strokeWidth="6"/>
-            <circle cx="60.8" cy="28" r="8" fill="none" stroke="var(--logo-blue)" strokeWidth="6"/>
-            <circle cx="60.8" cy="52" r="8" fill="none" stroke="var(--logo-blue)" strokeWidth="6"/>
-            <circle cx="40" cy="64" r="8" fill="none" stroke="var(--logo-blue)" strokeWidth="6"/>
-            <circle cx="19.2" cy="52" r="8" fill="none" stroke="var(--logo-blue)" strokeWidth="6"/>
-            <circle cx="19.2" cy="28" r="8" fill="none" stroke="var(--logo-blue)" strokeWidth="6"/>
-          </svg>
-        </div>
+        <div className="hero-shell hero-float hero-float-2">
+          <div className="hero-badge">Adaptive AI Learning System</div>
+          <h1 className="hero-title hero-brand-title">KIRIGUMI</h1>
+          <p className="hero-sub">
+            Build a course, track mastery, and let the system recommend what to study next based on performance, behavior, and deadlines.
+          </p>
 
-        {/* KIRIGUMI wordmark — full width, orange, ultra-spaced */}
-        <div className="hero-kirigumi hero-float hero-float-1">KIRIGUMI</div>
+          <div className="hero-form-card">
+            <input className="hero-topic-input" type="text" placeholder="Enter a topic, subject, or exam area" value={topic} onChange={e => setTopic(e.target.value)} onKeyDown={e => e.key === "Enter" && onGenerate()} autoFocus />
 
-        {/* Headline: "Learn" white, "anything." black with orange border, "Deeply" white */}
-        <h1 className="hero-display hero-float hero-float-2">
-          <span className="hd-learn">Learn</span>{" "}
-          <em className="hd-anything">anything.</em>
-          <br />
-          <span className="hd-deeply">Deeply.</span>
-        </h1>
+            <div className="hero-controls-row">
+              <select className="hero-control" value={goal} onChange={e => setGoal(e.target.value)}>
+                <option>Exam Preparation</option><option>Deep Learning</option><option>Quick Revision</option>
+              </select>
+              <select className="hero-control" value={level} onChange={e => setLevel(e.target.value)}>
+                <option>Beginner</option><option>Intermediate</option><option>Advanced</option>
+              </select>
+            </div>
 
-        <p className="hero-sub hero-float hero-float-3">
-          Enter a topic and our AI will build a structured curriculum with<br />
-          lessons, quizzes, and resources just for you.
-        </p>
+            <div className="hero-controls-row hero-controls-row-bottom">
+              <div className="hero-classroom-toggle-wrap">
+                <label className="classroom-toggle hero-classroom-toggle">
+                  <input type="checkbox" checked={useClassroomData && classroomConnected} onChange={e => setUseClassroomData(e.target.checked)} disabled={!classroomConnected} />
+                  <span>Use Google Classroom Data</span>
+                </label>
+                <div className="classroom-toggle-note">Used only when Classroom data matches the searched topic.</div>
+              </div>
+              {!classroomConnected && <button className="classroom-connect-btn" onClick={onConnectClassroom} disabled={classroomLoading}>{classroomLoading ? "Connecting…" : "Connect Google Classroom"}</button>}
+            </div>
 
-        <HeroAnimatedText />
+            <button className="hero-generate-btn" onClick={onGenerate} disabled={loading || !topic.trim()}>
+              {loading ? <><span className="spin spin-white" /> Building…</> : "Build Course"}
+            </button>
+            {generateError && <div className="hero-error">{generateError}</div>}
+          </div>
 
-        <div className="hero-bar hero-float hero-float-5">
-          <input className="hero-bar-input" type="text" placeholder="What do you want to learn?" value={topic} onChange={e => setTopic(e.target.value)} onKeyDown={e => e.key === "Enter" && onGenerate()} autoFocus />
-          <div className="hero-bar-divider" />
-          <select className="hero-bar-select" value={level} onChange={e => setLevel(e.target.value)}>
-            <option>Beginner</option><option>Intermediate</option><option>Advanced</option>
-          </select>
-          <button className="hero-bar-btn" onClick={onGenerate} disabled={loading || !topic.trim()}>
-            {loading ? <><span className="spin spin-white" /> Building…</> : <>Build Course <span className="hero-bar-arrow">↗</span></>}
-          </button>
+          <div className="hero-guidance-strip">
+            <span>Tracks weak topics</span>
+            <span>Regenerates revision automatically</span>
+            <span>Reorders path by mastery</span>
+            <span>Supports exam mode</span>
+          </div>
         </div>
       </div>
     </div>
@@ -1351,6 +1631,72 @@ function ProgressStrip({ completed, total, topic, level }) {
       <div className="prog-pct-label">{pct}%</div>
       <div className="prog-strip"><div className="prog-bar" style={{ width: `${pct}%` }} /></div>
       <div className="prog-right-meta"><span>{topic}</span><span>{level}</span><span>{completed}/{total} topics</span></div>
+    </div>
+  );
+}
+
+function ClassroomAdvisory({ classroomConnected }) {
+  return (
+    <div className="classroom-advisory">
+      <div className="classroom-advisory-title">
+        {classroomConnected ? "Google Classroom Demo Connected" : "Google Classroom Demo"}
+      </div>
+      <p className="classroom-advisory-text">
+        This is currently a simulated Google Classroom integration to demonstrate the concept and usefulness. Live Classroom sync will be added in the next few days.
+      </p>
+      <p className="classroom-advisory-text">
+        Classroom-based prioritization only helps when matching material, assignments, or deadlines exist for your entered topic or subject. If there is no matching classroom material, the course content comes directly from the AI.
+      </p>
+    </div>
+  );
+}
+
+function ClassroomSnapshotCard({ classroomData, onConnectClassroom, classroomLoading }) {
+  const alerts = classroomData?.alerts || [];
+  const assignments = classroomData?.assignments || [];
+
+  return (
+    <div className="home-classroom-card">
+      <div className="home-classroom-header">
+        <div>
+          <div className="home-classroom-eyebrow">Google Classroom</div>
+          <div className="home-classroom-title">
+            {classroomData?.connected ? "Connected classroom snapshot" : "Connect mock classroom data"}
+          </div>
+        </div>
+        {!classroomData?.connected && (
+          <button className="classroom-connect-btn" onClick={onConnectClassroom} disabled={classroomLoading}>
+            {classroomLoading ? "Connecting…" : "Connect Google Classroom"}
+          </button>
+        )}
+      </div>
+      <ClassroomAdvisory classroomConnected={!!classroomData?.connected} />
+      {classroomData?.connected && (
+        <div className="home-classroom-grid">
+          <div className="home-classroom-block">
+            <div className="home-classroom-block-label">Urgent Alerts</div>
+            {alerts.length > 0
+              ? alerts.slice(0, 3).map((alert) => (
+                <div key={`${alert.assignment}-${alert.days_until_due}`} className="home-classroom-alert">
+                  {alert.message}
+                </div>
+              ))
+              : <div className="home-classroom-empty">No urgent deadlines yet. New alerts will show here automatically.</div>}
+          </div>
+          <div className="home-classroom-block">
+            <div className="home-classroom-block-label">Assignments</div>
+            {assignments.length > 0
+              ? assignments.slice(0, 3).map((item) => (
+                <div key={item.id} className="home-classroom-assignment">
+                  <strong>{item.title}</strong>
+                  <span>{item.course_name}</span>
+                  <span>{item.days_until_due === null ? "No due date" : `Due in ${item.days_until_due} day${item.days_until_due === 1 ? "" : "s"}`}</span>
+                </div>
+              ))
+              : <div className="home-classroom-empty">Assignments and deadlines will show up here after connection.</div>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1411,8 +1757,28 @@ function InlineLesson({ lesson, lessonVideos, webResources, webResourcesError, s
   );
 }
 
+// ─── Short Task Toast ─────────────────────────────────────────────────────────
+function ShortTaskToast({ message, onDismiss }) {
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const timer = setTimeout(() => { setVisible(false); setTimeout(onDismiss, 400); }, 12000);
+    return () => clearTimeout(timer);
+  }, [onDismiss]);
+  if (!message) return null;
+  return (
+    <div className={`short-task-toast ${visible ? "stt-visible" : "stt-hidden"}`}>
+      <div className="stt-icon">💡</div>
+      <div className="stt-content">
+        <div className="stt-label">Suggested Activity</div>
+        <div className="stt-message">{message}</div>
+      </div>
+      <button className="stt-close" onClick={() => { setVisible(false); setTimeout(onDismiss, 400); }}>✕</button>
+    </div>
+  );
+}
+
 // ─── Chapter Section ──────────────────────────────────────────────────────────
-function ChapterSection({ chapter, chapterIndex, completedLessons, onToggleComplete, lessonCache, typedTopics, topic, level, onOpenQuiz, expandedTopics, onTopicExpand }) {
+function ChapterSection({ chapter, chapterIndex, completedLessons, onToggleComplete, lessonCache, typedTopics, topic, level, onOpenQuiz, expandedTopics, onTopicExpand, ensureLessonLoaded, masteryMap, nextRecommended }) {
   const [open, setOpen] = useState(true);
   const [loadingTopics, setLoadingTopics] = useState(new Set());
   const doneCount = chapter.topics.filter(t => completedLessons.includes(t)).length;
@@ -1423,26 +1789,19 @@ function ChapterSection({ chapter, chapterIndex, completedLessons, onToggleCompl
     if (expandedTopics.has(topicItem) || lessonCache.current[topicItem]) return;
     setLoadingTopics(prev => new Set(prev).add(topicItem));
     try {
-      const [lessonRes, videoRes, webRes, suggestionRes] = await Promise.all([
-        axios.post(`${API_BASE}/generate-lesson`, { topic, module: topicItem, level }),
-        axios.get(`${API_BASE}/youtube-resources`, { params: { topic: topicItem, level } }).catch(() => ({ data: { videos: [] } })),
-        axios.get(`${API_BASE}/web-resources`, { params: { topic: topicItem, level } }).catch(() => ({ data: { articles: [], error: "Unable to load web resources right now." } })),
-        axios.post(`${API_BASE}/generate-study-suggestion`, {
-          course_topic: topic,
-          module_name: topicItem,
-          level,
-        }).catch(() => ({ data: { suggestion: "" } })),
-      ]);
-        lessonCache.current[topicItem] = {
-          lesson: lessonRes.data.lesson,
-          videos: videoRes.data.videos || [],
-          webResources: webRes.data.articles || [],
-          webResourcesError: webRes.data.error || "",
-          suggestion: suggestionRes.data.suggestion || "",
-          quiz: null,
-        };
+      await ensureLessonLoaded(topicItem, topic, level);
     } catch (e) { console.error(e); }
     finally { setLoadingTopics(prev => { const n = new Set(prev); n.delete(topicItem); return n; }); }
+  };
+
+  const getMasteryBadge = (topicItem) => {
+    if (!masteryMap) return null;
+    const key = topicItem.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const entry = masteryMap[key];
+    if (!entry) return null;
+    const colors = { weak: { color: "var(--red)", bg: "var(--red-dim)" }, moderate: { color: "var(--orange)", bg: "var(--orange-dim)" }, strong: { color: "var(--green)", bg: "var(--green-dim)" } };
+    const c = colors[entry.mastery] || colors.moderate;
+    return <span className="t-badge" style={{ color: c.color, background: c.bg, border: `1px solid ${c.color}`, fontWeight: 600 }}>{Math.round(entry.score)}% · {entry.mastery}</span>;
   };
 
   return (
@@ -1461,17 +1820,26 @@ function ChapterSection({ chapter, chapterIndex, completedLessons, onToggleCompl
             const isLoading = loadingTopics.has(topicItem);
             const cached = lessonCache.current[topicItem];
             const alreadyTyped = typedTopics.current.has(topicItem);
+            const isRecommended = nextRecommended && topicItem === nextRecommended;
             return (
               <div key={idx} className="topic-block">
-                <div className={`topic-row ${done ? "t-done" : ""} ${isExpanded ? "t-active" : ""}`} onClick={() => toggleTopic(topicItem)}>
-                  <span className="t-dot">{done ? "✓" : isExpanded ? "▸" : "◦"}</span>
+                <div data-topic-name={topicItem} className={`topic-row ${done ? "t-done" : ""} ${isExpanded ? "t-active" : ""} ${isRecommended ? "t-recommended" : ""}`} onClick={() => toggleTopic(topicItem)}>
+                  <span className="t-dot">{done ? "✓" : isExpanded ? "▸" : isRecommended ? "→" : "◦"}</span>
                   <span className="t-name">{topicItem}</span>
+                  {isRecommended && !done && <span className="t-badge" style={{ color: "var(--accent)", background: "var(--accent-dim)", border: "1px solid var(--accent-mid)", fontWeight: 700, fontSize: "8px" }}>AI RECOMMENDS</span>}
+                  {getMasteryBadge(topicItem)}
                   {done && <span className="t-badge done-b">Done</span>}
                   {isLoading && <span className="t-badge loading-b">Loading…</span>}
                   {isExpanded && !done && !isLoading && <span className="t-badge active-b">Open</span>}
                 </div>
                 {isExpanded && isLoading && <div className="inline-loading"><span className="spin spin-sm" /> Generating lesson…</div>}
-                {isExpanded && !isLoading && cached && (
+                {isExpanded && !isLoading && cached?.lessonError && (
+                  <div className="inline-lesson-error">
+                    <div className="inline-lesson-error-title">Lesson unavailable right now</div>
+                    <div>{cached.lessonError}</div>
+                  </div>
+                )}
+                {isExpanded && !isLoading && cached?.lesson && (
                   <InlineLesson
                     lesson={cached.lesson} lessonVideos={cached.videos || []} webResources={cached.webResources || []} webResourcesError={cached.webResourcesError || ""} suggestion={cached.suggestion || ""}
                     isCompleted={done} onToggleComplete={() => onToggleComplete(topicItem)}
@@ -1490,8 +1858,11 @@ function ChapterSection({ chapter, chapterIndex, completedLessons, onToggleCompl
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 export default function Home() {
+  const APP_STATE_KEY = "kirigumi_app_state_v1";
+  const THEME_KEY = "kirigumi_theme_v1";
   const [topic, setTopic] = useState("");
   const [level, setLevel] = useState("Beginner");
+  const [goal, setGoal] = useState("Deep Learning");
   const [course, setCourse] = useState(null);
   const [completedLessons, setCompletedLessons] = useState([]);
   const [activeTopic, setActiveTopic] = useState("");
@@ -1511,17 +1882,47 @@ export default function Home() {
   const [showAuth, setShowAuth] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
   const [pdfDownloading, setPdfDownloading] = useState(false);
+  const [generateError, setGenerateError] = useState("");
+  const [recommendations, setRecommendations] = useState(null);
+  const [classroomData, setClassroomData] = useState(null);
+  const [classroomLoading, setClassroomLoading] = useState(false);
+  const [useClassroomData, setUseClassroomData] = useState(false);
+  const [classroomInfoOpen, setClassroomInfoOpen] = useState(false);
+  const [classroomToastTick, setClassroomToastTick] = useState(0);
+  const [revisionAlert, setRevisionAlert] = useState(null);
+  const [showExamMode, setShowExamMode] = useState(false);
+  const [shortTaskToast, setShortTaskToast] = useState(null);
+  const [darkMode, setDarkMode] = useState(false);
 
   // Dark mode: default is false (light/cyan theme)
-  const [darkMode, setDarkMode] = useState(false);
-  const [themeTransition, setThemeTransition] = useState(false);
-
   const lessonCache = useRef({});
   const typedTopics = useRef(new Set());
   const [viewState, setViewState] = useState("home");
 
   const getTotalTopics = (c) => c?.chapters?.reduce((a, ch) => a + ch.topics.length, 0) ?? 0;
   const getAllTopics = (c) => c?.chapters?.flatMap(ch => ch.topics) ?? [];
+
+  // Build mastery lookup map from recommendations
+  const masteryMap = useMemo(() => {
+    if (!recommendations) return null;
+    const map = {};
+    const addEntries = (list, mastery) => {
+      if (!Array.isArray(list)) return;
+      list.forEach(item => {
+        const name = typeof item === "string" ? item : item?.topic || item?.name || "";
+        const score = typeof item === "object" ? (item?.score ?? item?.avg_score ?? 0) : 0;
+        const key = name.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        if (key) map[key] = { mastery, score: score || (mastery === "weak" ? 40 : mastery === "moderate" ? 70 : 90) };
+      });
+    };
+    addEntries(recommendations.weak_topics, "weak");
+    addEntries(recommendations.moderate_topics, "moderate");
+    addEntries(recommendations.strong_topics, "strong");
+    return Object.keys(map).length > 0 ? map : null;
+  }, [recommendations]);
+
+  const nextRecommended = recommendations?.next_recommended_step || null;
+  const showClassroomStatus = !!currentUser && !!classroomData?.connected;
 
   const handleTopicExpand = useCallback((topicItem) => {
     setExpandedTopics(prev => {
@@ -1531,13 +1932,69 @@ export default function Home() {
     });
   }, []);
 
-  // Theme toggle with block animation
-  const toggleDark = useCallback(() => {
-    setThemeTransition(true);
-    setTimeout(() => {
-      setDarkMode(d => !d);
-      setTimeout(() => setThemeTransition(false), 50);
-    }, 500);
+  const ensureLessonLoaded = useCallback(async (topicItem, courseTopicArg = activeTopic, courseLevelArg = activeLevel) => {
+    if (!topicItem) return;
+    if (lessonCache.current[topicItem]) return;
+    const [lessonRes, videoRes, webRes, suggestionRes] = await Promise.allSettled([
+      axios.post(`${API_BASE}/generate-lesson`, { topic: courseTopicArg, module: topicItem, level: courseLevelArg, goal }),
+      axios.get(`${API_BASE}/youtube-resources`, { params: { topic: topicItem, level: courseLevelArg } }),
+      axios.get(`${API_BASE}/web-resources`, { params: { topic: topicItem, level: courseLevelArg } }),
+      axios.post(`${API_BASE}/generate-study-suggestion`, {
+        course_topic: courseTopicArg,
+        module_name: topicItem,
+        level: courseLevelArg,
+      }),
+    ]);
+
+    const lessonFailed = lessonRes.status === "rejected";
+    const lessonText = lessonRes.status === "fulfilled" ? lessonRes.value.data.lesson : "";
+    const lessonError = lessonFailed ? getErrorMessage(lessonRes.reason, "Could not generate this lesson right now. Please try opening it again.") : "";
+
+    lessonCache.current[topicItem] = {
+      lesson: lessonText,
+      lessonError,
+      videos: videoRes.status === "fulfilled" ? (videoRes.value.data.videos || []) : [],
+      webResources: webRes.status === "fulfilled" ? (webRes.value.data.articles || []) : [],
+      webResourcesError: webRes.status === "fulfilled" ? (webRes.value.data.error || "") : "Unable to load web resources right now.",
+      suggestion: suggestionRes.status === "fulfilled" ? (suggestionRes.value.data.suggestion || "") : "",
+      quiz: lessonCache.current[topicItem]?.quiz || null,
+    };
+  }, [activeTopic, activeLevel, goal]);
+
+  const openTopicByName = useCallback(async (topicItem) => {
+    if (!course || !topicItem) return;
+    try {
+      await ensureLessonLoaded(topicItem);
+      setExpandedTopics(new Set([topicItem]));
+      setTimeout(() => {
+        const el = document.querySelector(`[data-topic-name="${CSS.escape(topicItem)}"]`);
+        el?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 80);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [course, ensureLessonLoaded]);
+
+  useEffect(() => {
+    try {
+      const savedTheme = window.localStorage.getItem(THEME_KEY);
+      if (savedTheme === "dark") setDarkMode(true);
+      const rawState = window.localStorage.getItem(APP_STATE_KEY);
+      if (rawState) {
+        const saved = JSON.parse(rawState);
+        setTopic(saved.topic || "");
+        setLevel(saved.level || "Beginner");
+        setGoal(saved.goal || "Deep Learning");
+        setUseClassroomData(!!saved.useClassroomData);
+        if (saved.view === "course" && saved.courseData) {
+          setCourse(saved.courseData);
+          setActiveTopic(saved.activeTopic || saved.topic || "");
+          setActiveLevel(saved.activeLevel || saved.level || "Beginner");
+          setRecommendations(saved.recommendations || saved.courseData.recommendations || null);
+          setViewState("course");
+        }
+      }
+    } catch {}
   }, []);
 
   useEffect(() => {
@@ -1558,9 +2015,82 @@ export default function Home() {
     setProfileCourses(courses);
   }, [currentUser]);
 
+  const refreshRecommendations = useCallback(async (courseTopic, courseLevel, topics, shouldUseClassroom = useClassroomData) => {
+    if (!currentUser || !courseTopic || !topics?.length) return null;
+    try {
+      const data = await loadRecommendations({
+        course_topic: courseTopic,
+        level: courseLevel,
+        all_topics: topics,
+        use_classroom_data: shouldUseClassroom,
+      });
+      setRecommendations(data);
+      return data;
+    } catch (e) {
+      console.error(e);
+      return null;
+    }
+  }, [currentUser, useClassroomData]);
+
+  const handleConnectClassroom = useCallback(async () => {
+    if (!currentUser) {
+      setShowAuth(true);
+      return;
+    }
+    setClassroomLoading(true);
+    try {
+      const data = await connectClassroom(topic || activeTopic || "General Studies");
+      setClassroomData(data);
+      setUseClassroomData(true);
+      setClassroomInfoOpen(true);
+      setClassroomToastTick((prev) => prev + 1);
+      if (course && activeTopic) {
+        await refreshRecommendations(activeTopic, activeLevel, getAllTopics(course), true);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setClassroomLoading(false);
+    }
+  }, [currentUser, topic, activeTopic, activeLevel, course, refreshRecommendations]);
+
   useEffect(() => {
     refreshProfileCourses();
   }, [refreshProfileCourses]);
+
+  useEffect(() => {
+    const hydrateClassroom = async () => {
+      if (!currentUser) {
+        setClassroomData(null);
+        setUseClassroomData(false);
+        return;
+      }
+      try {
+        const data = await loadClassroomData();
+        setClassroomData(data);
+      } catch {
+        setClassroomData(null);
+      }
+    };
+    hydrateClassroom();
+  }, [currentUser]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(THEME_KEY, darkMode ? "dark" : "light");
+      window.localStorage.setItem(APP_STATE_KEY, JSON.stringify({
+        view: course ? "course" : "home",
+        topic,
+        level,
+        goal,
+        activeTopic,
+        activeLevel,
+        useClassroomData,
+        courseData: course,
+        recommendations,
+      }));
+    } catch {}
+  }, [APP_STATE_KEY, THEME_KEY, darkMode, topic, level, goal, activeTopic, activeLevel, useClassroomData, course, recommendations]);
 
   useEffect(() => {
     if (!course || !activeTopic) return;
@@ -1577,26 +2107,43 @@ export default function Home() {
     return () => { cancelled = true; };
   }, [course, activeTopic, activeLevel, currentUser]);
 
+  useEffect(() => {
+    if (!course || !activeTopic || !currentUser) return;
+    if (recommendations) return;
+    refreshRecommendations(activeTopic, activeLevel, getAllTopics(course), useClassroomData);
+  }, [course, activeTopic, activeLevel, currentUser, useClassroomData, recommendations, refreshRecommendations]);
+
   // Browser back/forward — FIX 3
   useEffect(() => {
     const onPopState = (e) => {
       const state = e.state;
       if (!state || state.view === "home") {
         setCourse(null); setViewState("home"); setQuizModal(null); setTutorOpen(false);
+        setRecommendations(null); setRevisionAlert(null);
         setExpandedTopics(new Set());
         lessonCache.current = {}; typedTopics.current = new Set();
       } else if (state.view === "course" && state.courseData) {
-        setTopic(state.topic); setLevel(state.level);
-        setActiveTopic(state.topic); setActiveLevel(state.level);
+        setTopic(state.topic); setLevel(state.level); setGoal(state.goal || "Deep Learning");
+        setUseClassroomData(!!state.useClassroomData);
+        setActiveTopic(state.activeTopic || state.topic); setActiveLevel(state.activeLevel || state.level);
         setCourse(state.courseData); setViewState("course"); setQuizModal(null);
+        setRecommendations(state.recommendations || state.courseData.recommendations || null);
         setExpandedTopics(new Set());
         lessonCache.current = {}; typedTopics.current = new Set();
       }
     };
     window.addEventListener("popstate", onPopState);
-    if (!window.history.state) window.history.replaceState({ view: "home" }, "", window.location.pathname);
+    if (!window.history.state) {
+      window.history.replaceState(
+        course
+          ? { view: "course", topic, level, goal, activeTopic, activeLevel, useClassroomData, courseData: course, recommendations }
+          : { view: "home" },
+        "",
+        window.location.pathname
+      );
+    }
     return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+  }, [course, topic, level, goal, activeTopic, activeLevel, useClassroomData, recommendations]);
 
   const toggleLessonComplete = useCallback((moduleTitle) => {
     setCompletedLessons(prev => {
@@ -1604,7 +2151,12 @@ export default function Home() {
       if (currentUser) saveProgress(activeTopic, activeLevel, updated).catch(() => {});
       return updated;
     });
-  }, [activeTopic, activeLevel, currentUser]);
+    if (currentUser && course) {
+      setTimeout(() => {
+        refreshRecommendations(activeTopic, activeLevel, getAllTopics(course), useClassroomData);
+      }, 0);
+    }
+  }, [activeTopic, activeLevel, currentUser, course, refreshRecommendations, useClassroomData]);
 
   const isInProfile = course ? profileCourses.some(c => profileCourseKey(c.topic, c.level) === profileCourseKey(activeTopic, activeLevel)) : false;
 
@@ -1624,13 +2176,29 @@ export default function Home() {
     if (!topic.trim()) return;
     setLoading(true); setCourse(null); setQuizModal(null); setViewState("home");
     setTutorMessages([]); setExpandedTopics(new Set());
+    setRevisionAlert(null); setShortTaskToast(null);
+    setGenerateError("");
     lessonCache.current = {}; typedTopics.current = new Set();
     try {
-      const res = await axios.post(`${API_BASE}/generate-course`, { topic, level });
+      const res = await axios.post(`${API_BASE}/generate-course`, { topic, level, goal, use_classroom_data: useClassroomData });
       const courseData = res.data;
       setActiveTopic(topic.trim()); setActiveLevel(level); setCourse(courseData); setViewState("course");
-      window.history.pushState({ view: "course", topic: topic.trim(), level, courseData }, "", window.location.pathname);
-    } catch (e) { console.error(e); }
+      const recs = courseData.recommendations || null;
+      setRecommendations(recs);
+      window.history.pushState({ view: "course", topic: topic.trim(), level, goal, activeTopic: topic.trim(), activeLevel: level, useClassroomData, courseData, recommendations: recs }, "", window.location.pathname);
+      // Auto-scroll to recommended topic after render
+      if (recs?.next_recommended_step) {
+        setTimeout(() => {
+          const el = document.querySelector(`[data-topic-name="${CSS.escape(recs.next_recommended_step)}"]`);
+          el?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 600);
+      }
+      // Show short-task toast if returned
+      if (recs?.short_task) setShortTaskToast(recs.short_task);
+    } catch (e) {
+      console.error(e);
+      setGenerateError(getErrorMessage(e, "Could not generate the course right now. Please try again."));
+    }
     finally { setLoading(false); }
   };
 
@@ -1653,16 +2221,32 @@ export default function Home() {
   const handleNavigateToCourse = async (savedCourse) => {
     setLoading(true); setTopic(savedCourse.topic); setLevel(savedCourse.level);
     setTutorMessages([]); setExpandedTopics(new Set());
+    setRevisionAlert(null);
     lessonCache.current = {}; typedTopics.current = new Set();
     try {
-      const res = await axios.post(`${API_BASE}/generate-course`, { topic: savedCourse.topic, level: savedCourse.level });
+      const res = await axios.post(`${API_BASE}/generate-course`, { topic: savedCourse.topic, level: savedCourse.level, goal, use_classroom_data: useClassroomData });
       const courseData = res.data;
       setActiveTopic(savedCourse.topic); setActiveLevel(savedCourse.level);
       setCourse(courseData); setViewState("course");
-      window.history.pushState({ view: "course", topic: savedCourse.topic, level: savedCourse.level, courseData }, "", window.location.pathname);
+      const recs = courseData.recommendations || null;
+      setRecommendations(recs);
+      window.history.pushState({ view: "course", topic: savedCourse.topic, level: savedCourse.level, goal, activeTopic: savedCourse.topic, activeLevel: savedCourse.level, useClassroomData, courseData, recommendations: recs }, "", window.location.pathname);
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   };
+
+  const handleGoHome = useCallback(() => {
+    setCourse(null);
+    setViewState("home");
+    setQuizModal(null);
+    setTutorOpen(false);
+    setRecommendations(null);
+    setRevisionAlert(null);
+    setExpandedTopics(new Set());
+    lessonCache.current = {};
+    typedTopics.current = new Set();
+    window.history.pushState({ view: "home" }, "", window.location.pathname);
+  }, []);
 
   const handleDownloadFullCourse = async () => {
     if (!course || pdfDownloading) return;
@@ -1732,8 +2316,6 @@ export default function Home() {
   const showHome = !course && !loading && !authLoading;
   const showCourse = course && !loading && !authLoading;
 
-  const dm = darkMode;
-
   return (
     <>
       <style>{`
@@ -1777,28 +2359,28 @@ export default function Home() {
 
         /* Dark mode overrides */
         body.dark-mode {
-          --bg: #080810;
-          --bg2: #0d0d1a;
+          --bg: #07111b;
+          --bg2: #0d1c2b;
           --surface: rgba(255,255,255,0.04);
           --surface2: rgba(255,255,255,0.07);
           --border: rgba(255,255,255,0.08);
           --border2: rgba(255,255,255,0.14);
-          --text: #f0f0ff;
-          --text2: #9090b0;
-          --text3: #50506a;
-          --accent: #7c3aed;
-          --accent-mid: #8b5cf6;
-          --accent-light: #a78bfa;
-          --accent-glow: rgba(124,58,237,0.25);
-          --accent-glow2: rgba(139,92,246,0.15);
-          --accent-dim: rgba(124,58,237,0.12);
+          --text: #eef8ff;
+          --text2: #94b8cc;
+          --text3: #5d7f91;
+          --accent: #14b8a6;
+          --accent-mid: #22d3ee;
+          --accent-light: #67e8f9;
+          --accent-glow: rgba(34,211,238,0.22);
+          --accent-glow2: rgba(20,184,166,0.14);
+          --accent-dim: rgba(34,211,238,0.12);
           --orange: #fb923c;
           --orange-dim: rgba(251,146,60,0.12);
-          --logo-blue: #39a0ff;
+          --logo-blue: #22d3ee;
           --green: #22d3a0; --green-dim: rgba(34,211,160,0.14);
           --red: #f87171; --red-dim: rgba(248,113,113,0.14);
           --blue: #60a5fa; --blue-dim: rgba(96,165,250,0.12);
-          --hero-bg: #080810;
+          --hero-bg: #07111b;
         }
 
         html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
@@ -1858,25 +2440,20 @@ export default function Home() {
         /* Navbar KIRIGUMI text logo — top-left, moderate size */
         .navbar-kiri-logo {
           font-family: var(--ff-head);
-          font-weight: 900;
-          font-size: 1.15rem;
-          letter-spacing: 0.22em;
+          font-weight: 850;
+          font-size: .95rem;
+          letter-spacing: 0.14em;
           text-transform: uppercase;
           color: var(--orange);
           pointer-events: all;
           user-select: none;
-          text-shadow: 0 1px 8px rgba(249,115,22,0.15);
+          text-shadow: none;
         }
-
-        /* Hero centred logo icon above wordmark */
-        .hero-logo-icon {
-          display: flex; align-items: center; justify-content: center;
-          margin-bottom: 14px;
-          animation: heroIn .9s var(--ease2) both, heroFloat 5.5s ease-in-out infinite 1s;
-        }
-        .hero-logo-svg {
-          width: 62px; height: 62px;
-          filter: drop-shadow(0 4px 16px rgba(13,94,168,0.24));
+        .navbar-kiri-btn,
+        .compact-logo-btn {
+          background: transparent;
+          border: none;
+          cursor: pointer;
         }
 
         .navbar-profile {
@@ -1901,6 +2478,81 @@ export default function Home() {
           display: flex; align-items: center; justify-content: center;
           border: 2px solid var(--bg);
         }
+        .classroom-status-wrap {
+          position: relative;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .classroom-status-pill {
+          padding: 9px 12px;
+          border-radius: 999px;
+          background: var(--green-dim);
+          color: var(--green);
+          border: 1px solid rgba(16,185,129,.22);
+          font-family: var(--ff-mono);
+          font-size: 9px;
+          letter-spacing: .08em;
+          text-transform: uppercase;
+          white-space: nowrap;
+        }
+        .classroom-status-pill-btn,
+        .classroom-status-info-btn {
+          cursor: pointer;
+        }
+        .classroom-status-pill-btn {
+          border: 1px solid rgba(16,185,129,.22);
+        }
+        .classroom-status-info-btn {
+          padding: 9px 10px;
+          border-radius: 999px;
+          border: 1px solid var(--orange);
+          background: var(--orange-dim);
+          color: var(--orange);
+          font-family: var(--ff-mono);
+          font-size: 9px;
+          letter-spacing: .1em;
+          text-transform: uppercase;
+        }
+        .classroom-status-disclaimer {
+          position: absolute;
+          top: calc(100% + 10px);
+          right: 0;
+          width: min(270px, 76vw);
+          padding: 12px 14px;
+          border-radius: 14px;
+          border: 1px solid var(--border);
+          background: rgba(255,255,255,.96);
+          color: var(--text2);
+          line-height: 1.6;
+          box-shadow: 0 18px 44px rgba(8,145,178,.12);
+          z-index: 20;
+        }
+        body.dark-mode .classroom-status-disclaimer {
+          background: rgba(8,18,28,.96);
+        }
+        .theme-toggle-btn {
+          min-width: 84px;
+          padding: 10px 14px;
+          border-radius: 999px;
+          border: 1px solid var(--border2);
+          background: rgba(255,255,255,.78);
+          color: var(--text);
+          font-family: var(--ff-mono);
+          font-size: 10px;
+          letter-spacing: .12em;
+          text-transform: uppercase;
+          cursor: pointer;
+          transition: transform .16s ease, border-color .2s ease, background .2s ease;
+        }
+        .theme-toggle-btn:hover {
+          transform: translateY(-1px);
+          border-color: var(--accent);
+        }
+        body.dark-mode .theme-toggle-btn {
+          background: rgba(255,255,255,.06);
+          color: #f4fbff;
+        }
 
         /* ══ HERO ══ */
         @keyframes heroIn { from { opacity:0; transform:translateY(28px); } to { opacity:1; transform:none; } }
@@ -1916,34 +2568,35 @@ export default function Home() {
           min-height: 100vh;
           display: flex; flex-direction: column;
           position: relative; overflow: hidden;
-          background: var(--hero-bg);
+          background:
+            radial-gradient(circle at top left, rgba(34,211,238,.16), transparent 36%),
+            linear-gradient(180deg, #f7fcff 0%, #eef8fd 52%, #ffffff 100%);
+        }
+        body.dark-mode .hero-wrap {
+          background:
+            radial-gradient(circle at top left, rgba(45,212,191,.14), transparent 34%),
+            radial-gradient(circle at bottom right, rgba(249,115,22,.12), transparent 30%),
+            linear-gradient(180deg, #07111b 0%, #0a1522 45%, #0d1c2b 100%);
         }
         .hero-blob { position:absolute; border-radius:50%; pointer-events:none; filter:blur(90px); }
         .hero-blob-1 {
-          width:500px; height:500px;
-          background: radial-gradient(circle, rgba(8,145,178,.18) 0%, transparent 70%);
-          top:-100px; left:-100px;
+          width:420px; height:420px;
+          background: radial-gradient(circle, rgba(8,145,178,.14) 0%, transparent 70%);
+          top:-80px; left:-80px;
           animation: blobDrift1 14s ease-in-out infinite alternate;
         }
-        body.dark-mode .hero-blob-1 { background: radial-gradient(circle, rgba(76,29,149,.35) 0%, transparent 70%); }
+        body.dark-mode .hero-blob-1 { background: radial-gradient(circle, rgba(57,160,255,.16) 0%, transparent 70%); }
         .hero-blob-2 {
-          width:400px; height:400px;
-          background: radial-gradient(circle, rgba(6,182,212,.12) 0%, transparent 70%);
-          bottom:-80px; right:-80px;
+          width:320px; height:320px;
+          background: radial-gradient(circle, rgba(6,182,212,.09) 0%, transparent 70%);
+          bottom:-50px; right:-50px;
           animation: blobDrift2 17s ease-in-out infinite alternate;
         }
-        body.dark-mode .hero-blob-2 { background: radial-gradient(circle, rgba(124,58,237,.22) 0%, transparent 70%); }
-        .hero-blob-3 {
-          width:300px; height:300px;
-          background: radial-gradient(circle, rgba(34,211,238,.08) 0%, transparent 70%);
-          top:50%; left:50%; transform:translate(-50%,-50%);
-          animation: blobDrift3 10s ease-in-out infinite alternate;
-        }
-        body.dark-mode .hero-blob-3 { background: radial-gradient(circle, rgba(139,92,246,.15) 0%, transparent 70%); }
+        body.dark-mode .hero-blob-2 { background: radial-gradient(circle, rgba(57,160,255,.12) 0%, transparent 70%); }
 
         .hero-center {
           flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
-          padding: 80px 24px 60px;
+          padding: 96px 24px 60px;
           position:relative; z-index:1;
           animation: heroIn .9s var(--ease2) both;
         }
@@ -1954,128 +2607,334 @@ export default function Home() {
         .hero-float-4 { animation-delay:.42s; }
         .hero-float-5 { animation-delay:.56s; }
 
-        /* ── KIRIGUMI wordmark ── */
-        .hero-kirigumi {
+        .hero-shell {
+          width:min(760px, calc(100vw - 32px));
+          text-align:center;
+        }
+        .hero-badge {
+          display:inline-flex;
+          padding:8px 14px;
+          border-radius:999px;
+          border:1px solid rgba(8,145,178,.18);
+          background:rgba(255,255,255,.72);
+          color:var(--accent);
+          font-family:var(--ff-mono);
+          font-size:10px;
+          letter-spacing:.14em;
+          text-transform:uppercase;
+          margin-bottom:18px;
+        }
+        body.dark-mode .hero-badge { background:rgba(255,255,255,.04); }
+        .hero-title {
           font-family: var(--ff-head);
-          font-weight: 900;
-          font-size: clamp(2.4rem, 7.5vw, 7rem);
-          letter-spacing: clamp(0.3em, 3vw, 0.7em);
+          font-size: clamp(2.2rem, 5.6vw, 4.4rem);
+          line-height: 1.05;
+          letter-spacing: -.04em;
+          color: var(--text);
+          margin-bottom: 16px;
+        }
+        .hero-brand-title {
+          font-size: clamp(3.1rem, 9vw, 6.2rem);
+          letter-spacing: .16em;
           text-transform: uppercase;
           color: var(--orange);
-          text-align: center;
-          width: 100%;
-          margin-bottom: 4px;
-          user-select: none;
-          animation: kirigumiIn 1.1s var(--ease2) both;
-          line-height: 1;
-          text-shadow: 0 2px 20px rgba(249,115,22,0.18);
+          font-weight: 850;
+          text-shadow: 0 14px 34px rgba(249,115,22,.14);
         }
-
-        /* ── Hero headline ── */
-        .hero-display {
-          font-family: var(--ff-head);
-          font-size: clamp(3rem, 7.5vw, 7rem);
-          font-weight: 900;
-          line-height: 1.02;
-          letter-spacing: -.03em;
-          text-align: center;
-          margin-bottom: 18px;
+        body.dark-mode .hero-brand-title {
+          color: transparent;
+          background: linear-gradient(135deg, var(--orange), var(--accent), #22d3ee);
+          -webkit-background-clip: text;
+          background-clip: text;
+          text-shadow: 0 14px 34px rgba(8,145,178,.12);
         }
-        /* "Learn" and "Deeply" — white in both modes (with orange border) */
-        .hd-learn, .hd-deeply {
-          color: #ffffff;
-          -webkit-text-stroke: 1.5px var(--orange);
-          paint-order: stroke fill;
-          font-style: normal;
-        }
-        body:not(.dark-mode) .hd-learn,
-        body:not(.dark-mode) .hd-deeply {
-          color: #ffffff;
-          -webkit-text-stroke: 1.5px var(--orange);
-          text-shadow: 0 2px 18px rgba(249,115,22,0.22);
-        }
-        /* "anything." — black with orange border */
-        .hd-anything {
-          color: #111111;
-          font-style: italic;
-          -webkit-text-stroke: 1.5px var(--orange);
-          paint-order: stroke fill;
-        }
-        body.dark-mode .hd-anything { color: #ffffff; }
-
         .hero-sub {
-          font-size: clamp(.9rem, 1.8vw, 1.05rem);
+          font-size: 1rem;
           color: var(--text2);
           text-align: center;
-          line-height: 1.7;
-          margin-bottom: 20px;
-          max-width: 520px;
+          line-height: 1.75;
+          margin: 0 auto 28px;
+          max-width: 700px;
         }
-        .hero-sub br { display: block; }
-        .hero-motion-wrap { width:min(760px,calc(100vw - 48px)); display:flex; flex-direction:column; gap:12px; margin-bottom:30px; animation:heroIn 1.1s var(--ease2) both .15s; }
-        .hero-motion-chip { display:flex; align-items:center; gap:12px; padding:12px 16px; border-radius:999px; background:rgba(255,255,255,.68); border:1px solid rgba(13,94,168,.16); box-shadow:0 10px 30px rgba(13,94,168,.08); backdrop-filter:blur(16px); }
-        body.dark-mode .hero-motion-chip { background:rgba(10,14,28,.82); border-color:rgba(57,160,255,.22); box-shadow:0 10px 28px rgba(0,0,0,.28); }
-        .hero-motion-label { font-family:var(--ff-mono); font-size:9px; letter-spacing:.18em; text-transform:uppercase; color:var(--logo-blue); white-space:nowrap; }
-        .hero-motion-text { font-family:var(--ff-head); font-size:.92rem; font-weight:600; color:var(--text); min-height:1.4em; }
-        .hero-marquee { overflow:hidden; border-top:1px solid rgba(13,94,168,.12); border-bottom:1px solid rgba(13,94,168,.12); }
-        .hero-marquee-track { display:flex; align-items:center; gap:28px; width:max-content; animation:marqueeSlide 20s linear infinite; padding:6px 0; }
-        .hero-marquee-track span { font-family:var(--ff-mono); font-size:10px; letter-spacing:.16em; text-transform:uppercase; color:var(--text3); white-space:nowrap; }
-        .hero-marquee-track span::before { content:'•'; color:var(--logo-blue); margin-right:12px; }
-
-        /* ── Pill input bar ── */
-        .hero-bar {
-          display: flex; align-items: center;
-          background: rgba(255,255,255,0.88);
-          border: 1.5px solid var(--accent-mid);
-          border-radius: 16px;
-          padding: 6px 6px 6px 20px;
-          width: min(680px, calc(100vw - 48px));
-          backdrop-filter: blur(20px);
-          box-shadow: 0 0 0 1px var(--accent-dim), 0 8px 40px rgba(0,0,0,.1);
-          transition: box-shadow .25s, border-color .25s;
+        .hero-form-card {
+          display:flex;
+          flex-direction:column;
+          gap:14px;
+          padding:20px;
+          border-radius:24px;
+          border:1px solid rgba(8,145,178,.2);
+          background:rgba(255,255,255,.84);
+          box-shadow:0 24px 70px rgba(8,145,178,.09);
+          backdrop-filter: blur(16px);
         }
-        body.dark-mode .hero-bar {
-          background: rgba(15,15,28,.9);
-          box-shadow: 0 0 0 1px var(--accent-dim), 0 8px 40px rgba(0,0,0,.4);
+        body.dark-mode .hero-form-card {
+          background:rgba(12,18,32,.9);
+          border-color:rgba(57,160,255,.2);
+          box-shadow:0 24px 70px rgba(0,0,0,.24);
         }
-        .hero-bar:focus-within {
-          border-color: var(--accent);
-          box-shadow: 0 0 0 3px var(--accent-dim), 0 8px 40px rgba(0,0,0,.15);
+        .hero-topic-input {
+          width:100%;
+          padding:18px 20px;
+          border-radius:18px;
+          border:1px solid var(--border2);
+          background:var(--bg);
+          color:var(--text);
+          font-family:var(--ff-body);
+          font-size:1rem;
+          outline:none;
         }
-        .hero-bar-input {
-          flex:1; background:transparent; border:none; outline:none;
-          color: var(--text);
-          font-family: var(--ff-body); font-size: .975rem;
-          padding: 10px 0; min-width:0;
+        .hero-topic-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+        .hero-controls-row {
+          display:grid;
+          grid-template-columns:repeat(2, minmax(0, 1fr));
+          gap:12px;
         }
-        .hero-bar-input::placeholder { color: var(--text3); }
-        .hero-bar-divider { width:1px; height:28px; background: var(--border); flex-shrink:0; margin:0 12px; }
-        .hero-bar-select {
-          background: var(--surface); border: 1px solid var(--border);
-          border-radius: 10px; padding: 8px 14px;
-          color: var(--text2); font-family: var(--ff-body); font-size: .88rem;
-          outline:none; appearance:none; cursor:pointer; flex-shrink:0;
-          transition: background .15s;
+        .hero-controls-row-bottom {
+          grid-template-columns: 1fr auto;
+          align-items:center;
         }
-        .hero-bar-select:focus { background: var(--surface2); color: var(--text); }
-        .hero-bar-select option { background: var(--bg); }
-        .hero-bar-btn {
-          margin-left: 8px; flex-shrink:0;
-          padding: 12px 24px;
-          background: var(--accent); border:none; border-radius: 12px;
-          color: #fff; font-family: var(--ff-head); font-size: .95rem; font-weight:700;
-          cursor:pointer; display:flex; align-items:center; gap:7px;
-          transition: background .2s, transform .15s, box-shadow .2s;
+        .hero-control {
+          width:100%;
+          min-height:48px;
+          border-radius:14px;
+          border:1px solid var(--border);
+          background:var(--surface);
+          color:var(--text);
+          font-family:var(--ff-body);
+          font-size:.95rem;
+          padding:0 14px;
+          outline:none;
+        }
+        .hero-control option { background: var(--bg); }
+        .classroom-toggle {
+          display:flex; align-items:center; gap:8px; flex-shrink:0;
+          padding:13px 14px; border:1px solid var(--border); border-radius:14px;
+          background:var(--surface); color:var(--text2); font-size:.92rem;
+          min-height:48px;
+        }
+        .classroom-toggle input { accent-color: var(--accent); }
+        .hero-classroom-toggle { width:100%; justify-content:flex-start; }
+        .hero-classroom-toggle-wrap { display:flex; flex-direction:column; gap:6px; width:100%; }
+        .classroom-toggle-note {
+          padding-left: 2px;
+          color: var(--text3);
+          font-size: .78rem;
+          line-height: 1.4;
+          text-align: left;
           white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
-        .hero-bar-btn:hover:not(:disabled) { background: var(--accent-mid); transform: translateY(-1px); box-shadow: 0 8px 24px var(--accent-glow); }
-        .hero-bar-btn:disabled { opacity:.45; cursor:not-allowed; }
-        .hero-bar-arrow { font-size:1rem; font-weight:700; }
+        .classroom-connect-btn {
+          flex-shrink:0; border:1px solid var(--orange); background:var(--orange-dim);
+          color:var(--orange); border-radius:14px; padding:13px 16px; cursor:pointer;
+          font-family:var(--ff-mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+        }
+        .classroom-connect-btn:disabled { opacity:.6; cursor:not-allowed; }
+        .hero-generate-btn {
+          width:100%;
+          min-height:54px;
+          border:none;
+          border-radius:16px;
+          background:linear-gradient(135deg, var(--accent), var(--accent-mid));
+          color:#fff;
+          font-family:var(--ff-head);
+          font-size:1rem;
+          font-weight:800;
+          cursor:pointer;
+          transition:transform .15s, box-shadow .2s, opacity .2s;
+        }
+        .hero-generate-btn:hover:not(:disabled) { transform:translateY(-1px); box-shadow:0 14px 30px var(--accent-glow); }
+        .hero-generate-btn:disabled { opacity:.55; cursor:not-allowed; }
+        .hero-error {
+          border:1px solid rgba(239,68,68,.24);
+          background:rgba(239,68,68,.08);
+          color:var(--red);
+          border-radius:14px;
+          padding:12px 14px;
+          line-height:1.6;
+          text-align:left;
+          font-size:.92rem;
+        }
+        .hero-guidance-strip {
+          display:flex;
+          flex-wrap:wrap;
+          justify-content:center;
+          gap:10px 18px;
+          margin-top:18px;
+          color:var(--text3);
+          font-family:var(--ff-mono);
+          font-size:10px;
+          letter-spacing:.12em;
+          text-transform:uppercase;
+        }
+        .home-lower-wrap {
+          max-width:1100px;
+          margin:0 auto;
+          padding:0 24px 40px;
+          position:relative;
+          z-index:1;
+        }
+        .classroom-live-toasts {
+          position: fixed;
+          top: 96px;
+          right: 24px;
+          z-index: 80;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          pointer-events: none;
+        }
+        .classroom-live-toast {
+          position: relative;
+          width: min(320px, calc(100vw - 32px));
+          padding: 14px 42px 14px 16px;
+          border-radius: 16px;
+          border: 1px solid rgba(8,145,178,.18);
+          background: rgba(255,255,255,.94);
+          box-shadow: 0 20px 50px rgba(8,145,178,.14);
+          pointer-events: auto;
+          animation: toastSlideIn .55s var(--ease2) both;
+        }
+        body.dark-mode .classroom-live-toast {
+          background: rgba(8,18,28,.94);
+          border-color: rgba(34,211,238,.16);
+          box-shadow: 0 20px 50px rgba(0,0,0,.3);
+        }
+        .classroom-live-toast-title {
+          font-family: var(--ff-mono);
+          font-size: 9px;
+          letter-spacing: .18em;
+          text-transform: uppercase;
+          color: var(--accent);
+          margin-bottom: 6px;
+        }
+        .classroom-live-toast-text {
+          color: var(--text);
+          line-height: 1.55;
+          font-size: .9rem;
+        }
+        .classroom-live-toast-close {
+          position: absolute;
+          top: 10px;
+          right: 10px;
+          border: none;
+          background: transparent;
+          color: var(--text3);
+          cursor: pointer;
+        }
+        @keyframes toastSlideIn {
+          from { opacity: 0; transform: translateX(42px) scale(.96); }
+          to { opacity: 1; transform: translateX(0) scale(1); }
+        }
+        .home-classroom-card,
+        .classroom-advisory {
+          border:1px solid var(--border);
+          border-radius:20px;
+          background:rgba(255,255,255,.72);
+          box-shadow:0 18px 50px rgba(8,145,178,.08);
+        }
+        body.dark-mode .home-classroom-card,
+        body.dark-mode .classroom-advisory {
+          background:rgba(255,255,255,.03);
+          box-shadow:none;
+        }
+        .home-classroom-card {
+          padding:22px;
+          margin-top:-16px;
+        }
+        .home-classroom-header {
+          display:flex;
+          align-items:flex-start;
+          justify-content:space-between;
+          gap:16px;
+          margin-bottom:16px;
+        }
+        .home-classroom-eyebrow,
+        .classroom-advisory-title {
+          font-family:var(--ff-mono);
+          font-size:10px;
+          letter-spacing:.18em;
+          text-transform:uppercase;
+          color:var(--accent);
+        }
+        .home-classroom-title {
+          margin-top:8px;
+          font-family:var(--ff-head);
+          font-size:1.15rem;
+          font-weight:800;
+          color:var(--text);
+        }
+        .home-classroom-grid {
+          display:grid;
+          grid-template-columns:repeat(2, minmax(0, 1fr));
+          gap:14px;
+          margin-top:16px;
+        }
+        .home-classroom-block {
+          border:1px solid var(--border);
+          border-radius:16px;
+          padding:16px;
+          background:var(--surface);
+        }
+        .home-classroom-block-label {
+          font-family:var(--ff-mono);
+          font-size:9px;
+          letter-spacing:.16em;
+          text-transform:uppercase;
+          color:var(--text3);
+          margin-bottom:10px;
+        }
+        .home-classroom-alert,
+        .home-classroom-assignment {
+          display:flex;
+          flex-direction:column;
+          gap:4px;
+          padding:12px;
+          border-radius:12px;
+          background:rgba(255,255,255,.72);
+          color:var(--text);
+          margin-bottom:10px;
+        }
+        body.dark-mode .home-classroom-alert,
+        body.dark-mode .home-classroom-assignment {
+          background:rgba(255,255,255,.04);
+        }
+        .home-classroom-alert {
+          border:1px solid rgba(249,115,22,.18);
+          color:var(--orange);
+        }
+        .home-classroom-assignment span,
+        .home-classroom-empty,
+        .classroom-advisory-text {
+          color:var(--text2);
+          line-height:1.65;
+        }
+        .classroom-advisory {
+          margin:18px 0 24px;
+          padding:18px 20px;
+        }
+        .classroom-advisory-title {
+          margin-bottom:8px;
+        }
+        .classroom-advisory-text + .classroom-advisory-text {
+          margin-top:8px;
+        }
+        .hero-guidance-strip span::before {
+          content:"";
+          display:inline-block;
+          width:6px;
+          height:6px;
+          border-radius:999px;
+          background:var(--accent);
+          margin-right:8px;
+          vertical-align:middle;
+        }
 
         /* ══ COMPACT BAR ══ */
         .compact-bar {
           position:sticky; top:0; z-index:100;
-          background: rgba(240,250,255,0.94);
+          background: rgba(250,253,255,0.94);
           backdrop-filter: blur(20px);
           border-bottom: 1px solid var(--border);
           padding: 10px 24px;
@@ -2083,13 +2942,13 @@ export default function Home() {
         }
         body.dark-mode .compact-bar { background: rgba(8,8,16,.92); }
         @keyframes slideDown { from{opacity:0;transform:translateY(-100%)} to{opacity:1;transform:none} }
-        .compact-inner { max-width:1200px; margin:0 auto; display:flex; align-items:center; gap:10px; }
+        .compact-inner { max-width:1280px; margin:0 auto; display:flex; align-items:center; gap:10px; }
         /* KIRIGUMI compact logo */
         .compact-logo-kiri {
           font-family: var(--ff-head);
-          font-weight: 900;
-          font-size: 1rem;
-          letter-spacing: 0.2em;
+          font-weight: 850;
+          font-size: .9rem;
+          letter-spacing: 0.14em;
           text-transform: uppercase;
           color: var(--orange);
           flex-shrink: 0;
@@ -2108,6 +2967,7 @@ export default function Home() {
           border-radius:8px; padding:8px 12px; color:var(--text);
           font-family:var(--ff-body); font-size:.88rem; outline:none; appearance:none; cursor:pointer;
         }
+        .compact-classroom-btn { padding:8px 10px; border-radius:8px; }
         .compact-btn {
           background: var(--accent); border:none; border-radius:8px;
           width:36px; height:36px; display:flex; align-items:center; justify-content:center;
@@ -2116,6 +2976,20 @@ export default function Home() {
         }
         .compact-btn:hover { transform:scale(1.08); background:var(--accent-mid); }
         .compact-btn:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+        .compact-generate-btn {
+          min-height:36px;
+          padding:0 16px;
+          border:none;
+          border-radius:10px;
+          background:linear-gradient(135deg, var(--accent), var(--accent-mid));
+          color:#fff;
+          font-family:var(--ff-head);
+          font-size:.88rem;
+          font-weight:800;
+          cursor:pointer;
+          flex-shrink:0;
+        }
+        .compact-generate-btn:disabled { opacity:.55; cursor:not-allowed; }
         .compact-profile { width:34px!important; height:34px!important; margin-left:4px; }
 
         /* ══ LOADING ══ */
@@ -2432,13 +3306,58 @@ export default function Home() {
         body.dark-mode .ils-suggestion-card { border-color:rgba(57,160,255,.18); background:rgba(57,160,255,.08); }
         .ils-empty { padding:10px 12px; border:1px dashed var(--border2); border-radius:10px; font-size:.78rem; color:var(--text3); line-height:1.55; }
         .inline-loading { display:flex; align-items:center; gap:10px; padding:16px 18px 16px 38px; font-family:var(--ff-mono); font-size:11px; color:var(--text3); letter-spacing:.1em; border-top:1px solid var(--border); animation:pulse 1.5s ease-in-out infinite; }
+        .inline-lesson-error {
+          margin:0 14px 14px 38px;
+          padding:14px 16px;
+          border-radius:14px;
+          border:1px solid rgba(239,68,68,.22);
+          background:rgba(239,68,68,.08);
+          color:var(--red);
+          line-height:1.6;
+        }
+        .inline-lesson-error-title {
+          font-family:var(--ff-mono);
+          font-size:10px;
+          letter-spacing:.16em;
+          text-transform:uppercase;
+          margin-bottom:6px;
+        }
+
+        /* ══ RECOMMENDED TOPIC HIGHLIGHT ══ */
+        .topic-row.t-recommended { background:var(--accent-dim); border-left:3px solid var(--accent-mid); }
+        .topic-row.t-recommended:hover { background:rgba(8,145,178,.18); }
+        body.dark-mode .topic-row.t-recommended { background:rgba(124,58,237,.1); border-left-color:var(--accent-mid); }
+
+        /* ══ SHORT TASK TOAST ══ */
+        @keyframes sttIn { from{opacity:0;transform:translateY(20px) scale(0.95)} to{opacity:1;transform:translateY(0) scale(1)} }
+        @keyframes sttOut { from{opacity:1;transform:translateY(0) scale(1)} to{opacity:0;transform:translateY(20px) scale(0.95)} }
+        .short-task-toast {
+          position:fixed; bottom:28px; right:28px; z-index:1100;
+          display:flex; align-items:flex-start; gap:14px;
+          max-width:420px; padding:16px 20px;
+          border-radius:16px; border:1px solid var(--accent-mid);
+          background:rgba(255,255,255,.95); backdrop-filter:blur(16px);
+          box-shadow:0 12px 40px rgba(8,145,178,.18);
+        }
+        body.dark-mode .short-task-toast { background:rgba(12,12,24,.94); box-shadow:0 12px 40px rgba(0,0,0,.35); }
+        .stt-visible { animation:sttIn .4s var(--ease2) both; }
+        .stt-hidden { animation:sttOut .35s ease both; pointer-events:none; }
+        .stt-icon { font-size:1.3rem; flex-shrink:0; margin-top:2px; }
+        .stt-content { flex:1; min-width:0; }
+        .stt-label { font-family:var(--ff-mono); font-size:9px; letter-spacing:.18em; text-transform:uppercase; color:var(--accent); margin-bottom:5px; }
+        .stt-message { font-size:.9rem; color:var(--text); line-height:1.55; }
+        .stt-close { background:none; border:none; color:var(--text3); font-size:.9rem; cursor:pointer; padding:4px; flex-shrink:0; transition:color .2s; }
+        .stt-close:hover { color:var(--text); }
+
+        /* ══ CLASSROOM CONNECTED BADGE ══ */
+        .classroom-badge { display:inline-flex; align-items:center; gap:5px; padding:4px 10px; border-radius:6px; background:var(--green-dim); color:var(--green); font-family:var(--ff-mono); font-size:8px; letter-spacing:.1em; text-transform:uppercase; font-weight:600; flex-shrink:0; }
 
         /* ══ COURSE TOOLS ══ */
         .cba-wrap { margin-top:40px; padding-top:32px; }
         .cba-divider { display:flex; align-items:center; gap:16px; margin-bottom:24px; }
         .cba-divider-line { flex:1; height:1px; background:var(--border); }
         .cba-divider-label { font-family:var(--ff-mono); font-size:9px; letter-spacing:.22em; text-transform:uppercase; color:var(--text3); white-space:nowrap; flex-shrink:0; }
-        .cba-buttons { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+        .cba-buttons { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
         .cba-btn { display:flex; align-items:center; gap:14px; padding:18px 20px; border-radius:14px; border:1px solid var(--border); background:var(--surface); cursor:pointer; text-align:left; transition:background .2s,border-color .2s,transform .15s; }
         .cba-btn:hover { background:var(--surface2); transform:translateY(-2px); }
         .cba-btn-icon { font-size:1.6rem; flex-shrink:0; }
@@ -2452,6 +3371,103 @@ export default function Home() {
         .cba-revise:hover { border-color:var(--green); background:rgba(16,185,129,.08); }
         .cba-notes { border-color:var(--blue-dim); background:rgba(56,189,248,.04); }
         .cba-notes:hover { border-color:var(--blue); background:rgba(56,189,248,.08); }
+        .cba-exam { border-color:var(--orange-dim); background:rgba(249,115,22,.05); }
+        .cba-exam:hover { border-color:var(--orange); background:rgba(249,115,22,.11); }
+
+        .rec-panel {
+          margin: 26px 0 22px;
+          border:1px solid var(--border);
+          border-radius:22px;
+          padding:22px;
+          background:linear-gradient(145deg, rgba(255,255,255,.72), rgba(8,145,178,.05));
+          box-shadow:0 18px 50px rgba(8,145,178,.08);
+        }
+        body.dark-mode .rec-panel {
+          background:linear-gradient(145deg, rgba(18,18,34,.9), rgba(57,160,255,.06));
+          box-shadow:0 18px 50px rgba(0,0,0,.22);
+        }
+        .rec-header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:12px; }
+        .rec-eyebrow { font-family:var(--ff-mono); font-size:9px; letter-spacing:.18em; text-transform:uppercase; color:var(--accent); margin-bottom:6px; }
+        .rec-title { font-family:var(--ff-head); font-size:1.25rem; color:var(--text); }
+        .rec-next-pill {
+          padding:10px 14px; border-radius:999px; background:var(--accent-dim);
+          color:var(--accent); font-family:var(--ff-head); font-weight:700; font-size:.88rem;
+        }
+        .rec-summary { color:var(--text2); line-height:1.7; margin-bottom:16px; }
+        .rec-actions-row { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
+        .rec-primary-btn, .rec-secondary-btn, .rec-mini-btn {
+          border:none; border-radius:10px; cursor:pointer; font-weight:700;
+        }
+        .rec-primary-btn {
+          background:var(--accent); color:#fff; padding:11px 14px;
+        }
+        .rec-secondary-btn {
+          background:var(--surface2); color:var(--text); padding:11px 14px; border:1px solid var(--border2);
+        }
+        .rec-mini-btn {
+          background:transparent; color:var(--accent); padding:6px 10px; border:1px solid var(--accent-mid); font-size:.78rem;
+        }
+        .rec-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:14px; }
+        .rec-card {
+          border:1px solid var(--border); border-radius:16px; padding:16px;
+          background:rgba(255,255,255,.65);
+          height: fit-content;
+        }
+        .rec-card-wide { grid-column:1 / -1; }
+        .rec-card-label + .rec-empty,
+        .rec-card-label + .rec-line,
+        .rec-card-label + .rec-chip-row,
+        .rec-card-label + .rec-revision-row {
+          margin-top: 0;
+        }
+        .rec-card:nth-child(1),
+        .rec-card.rec-card-wide {
+          align-self: start;
+        }
+        body.dark-mode .rec-card { background:rgba(255,255,255,.03); }
+        .rec-card-label { font-family:var(--ff-mono); font-size:9px; letter-spacing:.18em; text-transform:uppercase; color:var(--text3); margin-bottom:10px; }
+        .rec-chip-row, .rec-line, .rec-alert {
+          display:flex; align-items:center; justify-content:space-between; gap:12px;
+          padding:10px 12px; border-radius:12px; background:var(--surface); color:var(--text);
+          margin-bottom:8px; line-height:1.5;
+        }
+        .rec-chip-actions { display:flex; align-items:center; gap:8px; }
+        .rec-alert { justify-content:flex-start; color:var(--orange); background:var(--orange-dim); }
+        .rec-empty { color:var(--text3); line-height:1.6; }
+        .rec-empty-note { margin-bottom:8px; }
+        .rec-connect-btn {
+          margin-top:12px; border:1px solid var(--accent); background:var(--accent);
+          color:#fff; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:700;
+        }
+        .rec-revision-row {
+          display:flex; align-items:center; justify-content:space-between; gap:14px;
+          padding:12px 14px; border-radius:12px; background:var(--surface); margin-bottom:8px;
+        }
+        .rec-revision-title { font-weight:700; color:var(--text); margin-bottom:4px; }
+        .rec-revision-sub { color:var(--text3); font-size:.82rem; }
+
+        .revision-alert-card {
+          margin-bottom:24px; border:1px solid rgba(249,115,22,.28); border-radius:20px;
+          background:linear-gradient(145deg, rgba(249,115,22,.08), rgba(255,255,255,.72)); padding:20px;
+        }
+        body.dark-mode .revision-alert-card { background:linear-gradient(145deg, rgba(249,115,22,.12), rgba(18,18,34,.92)); }
+        .revision-alert-header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:14px; }
+        .revision-alert-body { border-radius:14px; background:rgba(255,255,255,.65); padding:14px; }
+        body.dark-mode .revision-alert-body { background:rgba(255,255,255,.04); }
+
+        .exam-mode-wrap { display:flex; flex-direction:column; gap:18px; }
+        .exam-priority-list, .exam-revision-card, .exam-quiz-card {
+          border:1px solid var(--border); border-radius:18px; padding:18px; background:var(--surface);
+        }
+        .exam-block-title {
+          font-family:var(--ff-mono); font-size:10px; letter-spacing:.18em; text-transform:uppercase;
+          color:var(--accent); margin-bottom:12px;
+        }
+        .exam-chip-list { display:flex; flex-wrap:wrap; gap:10px; }
+        .exam-chip {
+          padding:8px 12px; border-radius:999px; background:var(--accent-dim); color:var(--accent);
+          font-weight:600; font-size:.86rem;
+        }
 
         /* ══ PANELS — fixed-height flex + scroll-behavior:auto ══ */
         @keyframes overlayIn { from{opacity:0} to{opacity:1} }
@@ -2901,28 +3917,32 @@ export default function Home() {
 
         /* ══ RESPONSIVE ══ */
         @media(max-width:1024px){
-          .hero-display{font-size:clamp(2.8rem,7vw,5.5rem)}
-          .hero-bar{width:min(580px,calc(100vw - 48px))}
           .course-page{padding:28px 20px 80px}
           .il-sidebar{width:260px}
           .ca-topic-bar-name{flex:0 0 130px}
         }
         @media(max-width:768px){
           .navbar{padding:16px 20px}
-          .hero-kirigumi{font-size:clamp(1.8rem,8vw,3.5rem);letter-spacing:clamp(0.2em,2vw,0.4em)}
-          .hero-display{font-size:clamp(2.2rem,9vw,3.8rem);letter-spacing:-.025em}
-          .hero-sub{font-size:.88rem;padding:0 8px}.hero-sub br{display:none}
-          .hero-motion-wrap{width:calc(100vw - 32px);margin-bottom:24px}
-          .hero-motion-chip{flex-direction:column;align-items:flex-start;border-radius:20px}
-          .hero-motion-text{font-size:.88rem}
+          .classroom-status-pill{display:none}
+          .classroom-live-toasts{top:88px;right:14px}
+          .theme-toggle-btn{min-width:auto;padding:10px 12px}
+          .hero-title{font-size:clamp(2rem,8vw,3rem)}
+          .hero-sub{font-size:.92rem;padding:0 8px}
           .hero-center{padding:80px 16px 50px}
-          .hero-bar{flex-direction:column;width:calc(100vw - 32px);padding:12px;gap:8px;border-radius:16px}
-          .hero-bar-input{width:100%;padding:10px 0 6px}.hero-bar-divider{display:none}
-          .hero-bar-select{width:100%;border-radius:10px;padding:10px 14px}
-          .hero-bar-btn{width:100%;padding:13px;justify-content:center;border-radius:12px}
+          .hero-shell{width:calc(100vw - 24px)}
+          .hero-form-card{padding:16px;border-radius:20px}
+          .home-lower-wrap{padding:0 14px 28px}
+          .home-classroom-card{padding:16px;margin-top:-6px}
+          .home-classroom-grid{grid-template-columns:1fr}
+          .home-classroom-header{flex-direction:column;align-items:stretch}
+          .hero-controls-row,.hero-controls-row-bottom{grid-template-columns:1fr}
+          .hero-topic-input,.hero-control,.classroom-toggle,.classroom-connect-btn,.hero-generate-btn{width:100%}
+          .classroom-toggle-note{white-space:normal}
           .compact-bar{padding:8px 14px}
-          .compact-input{font-size:.85rem;padding:7px 10px}.compact-select{padding:7px 10px;font-size:.82rem}
-          .compact-btn{width:34px;height:34px}
+          .compact-inner{flex-wrap:wrap}
+          .compact-logo-kiri{border-right:none;padding-right:0;width:100%}
+          .compact-input{font-size:.85rem;padding:7px 10px;min-width:0;flex:1 1 220px}.compact-select{padding:7px 10px;font-size:.82rem}
+          .compact-classroom-btn,.compact-generate-btn{flex:1 1 100%}
           .course-page{padding:20px 14px 80px}.course-main-title{font-size:1.5rem}
           .course-stats{gap:14px;font-size:11px}.prog-right-meta{display:none}
           .prog-pct-label{font-size:1.2rem;min-width:48px}
@@ -2932,7 +3952,7 @@ export default function Home() {
           .inline-lesson{display:flex;flex-direction:column}
           .il-main{padding:18px 14px 16px}.il-sidebar{width:100%;padding:0 14px 16px}
           .il-actions{flex-direction:column;gap:8px}.il-btn{width:100%;text-align:center;padding:11px}
-          .cba-buttons{grid-template-columns:1fr;gap:8px}.cba-btn{padding:14px 16px}
+          .cba-buttons,.rec-grid{grid-template-columns:1fr;gap:8px}.cba-btn{padding:14px 16px}
           .mode-panel,.mode-panel-wide,.qm-panel,.prof-panel,.ca-panel,.fct-panel,.tutor-panel{width:100vw;border-left:none;border-top:1px solid var(--border2)}
           .mode-panel,.mode-panel-wide{height:100dvh;max-height:100vh;border-radius:0;box-shadow:none}
           .mode-overlay,.prof-overlay,.qm-overlay,.ca-overlay,.fct-overlay,.tutor-overlay{align-items:flex-end;justify-content:stretch}
@@ -2949,8 +3969,6 @@ export default function Home() {
           .gate-start-btn,.gate-cancel-btn{width:100%;text-align:center}
         }
         @media(max-width:480px){
-          .hero-kirigumi{font-size:clamp(1.4rem,7vw,2.5rem);letter-spacing:clamp(0.15em,1.5vw,0.3em)}
-          .hero-display{font-size:clamp(1.9rem,9vw,3rem)}
           .course-main-title{font-size:1.35rem}
           .qm-header-actions{gap:5px}.qm-more-btn,.qm-reset-btn{padding:6px 10px;font-size:8px}
           .fct-meta{display:none}.fct-title{font-size:1.25rem}
@@ -2959,13 +3977,10 @@ export default function Home() {
 
       {/* Apply dark-mode class to body */}
       {typeof document !== "undefined" && (() => {
-        if (dm) document.body.classList.add("dark-mode");
+        if (darkMode) document.body.classList.add("dark-mode");
         else document.body.classList.remove("dark-mode");
         return null;
       })()}
-
-      {/* Block wipe transition overlay */}
-      <div className={`theme-wipe${themeTransition ? " active" : ""}`} />
 
       {authLoading && <StartupLoadingOverlay />}
 
@@ -2986,7 +4001,7 @@ export default function Home() {
           currentUser={currentUser}
           courses={profileCourses}
           onCoursesRefresh={refreshProfileCourses}
-          onSignOut={async () => { await clearSession(); setCurrentUser(null); setProfileCourses([]); setProfileOpen(false); }}
+          onSignOut={async () => { await clearSession(); setCurrentUser(null); setProfileCourses([]); setProfileOpen(false); setRecommendations(null); setClassroomData(null); setUseClassroomData(false); setClassroomInfoOpen(false); }}
         />
       )}
 
@@ -2994,30 +4009,59 @@ export default function Home() {
         quizGenerating && !currentQuizText
           ? (<div className="qm-overlay" onClick={() => setQuizModal(null)}><div className="qm-panel" style={{ alignItems: "center", justifyContent: "center" }}><CinematicLoader label="Generating quiz questions…" sublabel="Tailoring to your lesson" /></div></div>)
           : currentQuizText
-            ? (<QuizModal key={quizTick} rawQuiz={currentQuizText} moduleName={quizModal.moduleTitle} courseTopic={topic} level={level} allTopics={getAllTopics(course)} onClose={() => setQuizModal(null)} onGenerateMore={() => generateQuizFor(quizModal.moduleTitle)} generating={quizGenerating} onRevisitLesson={() => {}} />)
+            ? (<QuizModal key={quizTick} rawQuiz={currentQuizText} moduleName={quizModal.moduleTitle} courseTopic={activeTopic} level={activeLevel} allTopics={getAllTopics(course)} onClose={() => setQuizModal(null)} onGenerateMore={() => generateQuizFor(quizModal.moduleTitle)} generating={quizGenerating} onRevisitLesson={() => { const t = quizModal?.moduleTitle; setQuizModal(null); if (t) openTopicByName(t); }} currentUser={currentUser} useClassroomData={useClassroomData} onRecommendationsUpdate={(nextRecommendations, revisionLesson) => { if (nextRecommendations) { setRecommendations(nextRecommendations); if (nextRecommendations.short_task) setShortTaskToast(nextRecommendations.short_task); } if (revisionLesson) setRevisionAlert(revisionLesson); }} />)
             : null
       )}
 
-      {(showHome || (loading && !course)) && (
-        <HeroInput
-          topic={topic} setTopic={setTopic} level={level} setLevel={setLevel}
-          onGenerate={generateCourse} loading={loading}
-          onProfileOpen={() => currentUser ? setProfileOpen(true) : setShowAuth(true)}
-          profileCount={profileCourses.length}
-          currentUser={currentUser}
-          darkMode={dm} onToggleDark={toggleDark}
+      {showExamMode && course && (
+        <ExamModePanel
+          courseTopic={activeTopic}
+          level={activeLevel}
+          allTopics={getAllTopics(course)}
+          goal={goal}
+          useClassroomData={useClassroomData}
+          onClose={() => setShowExamMode(false)}
         />
+      )}
+
+      {(showHome || (loading && !course)) && (
+        <>
+          <HeroInput
+            topic={topic} setTopic={setTopic} level={level} setLevel={setLevel} goal={goal} setGoal={setGoal}
+            useClassroomData={useClassroomData} setUseClassroomData={setUseClassroomData}
+            classroomConnected={!!classroomData?.connected} onConnectClassroom={handleConnectClassroom} classroomLoading={classroomLoading}
+            onGenerate={generateCourse} loading={loading}
+            onProfileOpen={() => currentUser ? setProfileOpen(true) : setShowAuth(true)}
+            profileCount={profileCourses.length}
+            generateError={generateError}
+            showClassroomStatus={showClassroomStatus}
+            darkMode={darkMode}
+            onToggleTheme={() => setDarkMode(prev => !prev)}
+            onGoHome={handleGoHome}
+            onShowNotifications={() => setClassroomToastTick((prev) => prev + 1)}
+            disclaimerOpen={classroomInfoOpen}
+            onToggleDisclaimer={() => setClassroomInfoOpen((prev) => !prev)}
+          />
+          <ClassroomLiveToasts alerts={classroomData?.alerts || []} visible={!!currentUser && !!classroomData?.connected} resetKey={classroomToastTick} />
+        </>
       )}
 
       {showCourse && (
         <>
           <CompactBar
-            topic={topic} setTopic={setTopic} level={level} setLevel={setLevel}
+            topic={topic} setTopic={setTopic} level={level} setLevel={setLevel} goal={goal} setGoal={setGoal}
+            useClassroomData={useClassroomData} setUseClassroomData={setUseClassroomData}
+            classroomConnected={!!classroomData?.connected} onConnectClassroom={handleConnectClassroom} classroomLoading={classroomLoading}
             onGenerate={generateCourse} loading={loading}
             onProfileOpen={() => currentUser ? setProfileOpen(true) : setShowAuth(true)}
             profileCount={profileCourses.length}
-            currentUser={currentUser}
-            darkMode={dm} onToggleDark={toggleDark}
+            showClassroomStatus={showClassroomStatus}
+            darkMode={darkMode}
+            onToggleTheme={() => setDarkMode(prev => !prev)}
+            onGoHome={handleGoHome}
+            onShowNotifications={() => setClassroomToastTick((prev) => prev + 1)}
+            disclaimerOpen={classroomInfoOpen}
+            onToggleDisclaimer={() => setClassroomInfoOpen((prev) => !prev)}
           />
           <div className="course-page">
             <div className="course-header">
@@ -3027,6 +4071,7 @@ export default function Home() {
                 <span className="course-stat-item">{course.chapters.length} chapters</span>
                 <span className="course-stat-item">{totalTopics} topics</span>
                 <span className="course-stat-item">{activeLevel}</span>
+                <span className="course-stat-item">{goal}</span>
               </div>
               <div className="course-header-actions">
                 <button className={`add-profile-btn ${isInProfile ? "in-profile" : ""}`} onClick={addToProfile} disabled={isInProfile}>
@@ -3037,6 +4082,32 @@ export default function Home() {
                 </button>
               </div>
             </div>
+            <RecommendationPanel
+              recommendations={recommendations}
+              classroomData={classroomData}
+              onConnectClassroom={handleConnectClassroom}
+              classroomLoading={classroomLoading}
+              onOpenTopic={openTopicByName}
+              onOpenRevisionTopic={(topicItem) => {
+                const revision = (recommendations?.revision_lessons || []).find((item) => item.topic === topicItem);
+                if (revision) setRevisionAlert(revision);
+                openTopicByName(topicItem);
+              }}
+              onOpenExamMode={() => setShowExamMode(true)}
+              hideClassroom
+            />
+            {revisionAlert && (
+              <div className="revision-alert-card">
+                <div className="revision-alert-header">
+                  <div>
+                    <div className="rec-eyebrow">Autonomous Trigger</div>
+                    <h3 className="rec-title">Revision lesson generated for {revisionAlert.topic}</h3>
+                  </div>
+                  <button className="qm-close-btn" onClick={() => setRevisionAlert(null)}>✕</button>
+                </div>
+                <div className="revision-alert-body"><LessonText text={revisionAlert.revision} /></div>
+              </div>
+            )}
             <ProgressStrip completed={completedLessons.length} total={totalTopics} topic={activeTopic} level={activeLevel} />
             <div className="chapters-wrap">
               {course.chapters.map((chapter, i) => (
@@ -3046,11 +4117,12 @@ export default function Home() {
                   completedLessons={completedLessons} onToggleComplete={toggleLessonComplete}
                   lessonCache={lessonCache} typedTopics={typedTopics}
                   topic={topic} level={level} onOpenQuiz={openQuiz}
-                  expandedTopics={expandedTopics} onTopicExpand={handleTopicExpand}
+                  expandedTopics={expandedTopics} onTopicExpand={handleTopicExpand} ensureLessonLoaded={ensureLessonLoaded}
+                  masteryMap={masteryMap} nextRecommended={nextRecommended}
                 />
               ))}
             </div>
-            <CourseBottomActions courseTopic={activeTopic} level={activeLevel} allTopics={getAllTopics(course)} />
+            <CourseBottomActions courseTopic={activeTopic} level={activeLevel} allTopics={getAllTopics(course)} goal={goal} useClassroomData={useClassroomData} />
           </div>
 
           {!tutorOpen && <AiTutorFab onClick={() => setTutorOpen(true)} />}
@@ -3064,6 +4136,10 @@ export default function Home() {
             />
           )}
         </>
+      )}
+
+      {shortTaskToast && (
+        <ShortTaskToast message={shortTaskToast} onDismiss={() => setShortTaskToast(null)} />
       )}
     </>
   );
