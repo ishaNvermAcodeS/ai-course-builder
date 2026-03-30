@@ -157,11 +157,28 @@ async function loadClassroomData() {
   return res.data;
 }
 
-async function connectClassroom(topic) {
-  const res = await axios.post(`${API_BASE}/classroom-data`, {
-    use_mock: true,
-    course_topic: topic || "General Studies",
-  });
+async function refreshClassroomData() {
+  const res = await axios.get(`${API_BASE}/classroom-data`, { params: { refresh: true } });
+  return res.data;
+}
+
+async function loadClassroomCourses() {
+  const res = await axios.get(`${API_BASE}/classroom/courses`);
+  return res.data;
+}
+
+async function loadClassroomCoursework(courseId) {
+  const res = await axios.get(`${API_BASE}/classroom/coursework/${courseId}`);
+  return res.data;
+}
+
+async function loadClassroomAnnouncements(courseId) {
+  const res = await axios.get(`${API_BASE}/classroom/announcements/${courseId}`);
+  return res.data;
+}
+
+async function analyzeClassroom(courseId = "") {
+  const res = await axios.post(`${API_BASE}/classroom/analyze`, { course_id: courseId });
   return res.data;
 }
 
@@ -319,18 +336,100 @@ function parseInline(text) {
   return parts;
 }
 
-function LessonText({ text }) {
+function getLessonIndexLabel(chapterIndex, lessonIndex) {
+  return `${chapterIndex + 1}.${lessonIndex + 1}`;
+}
+
+function buildSelectionContextSnippet(fullText, selectedText) {
+  if (!fullText || !selectedText) return "";
+  const flatText = fullText.replace(/\s+/g, " ").trim();
+  const flatSelected = selectedText.replace(/\s+/g, " ").trim();
+  if (!flatText || !flatSelected) return "";
+  const startIndex = flatText.toLowerCase().indexOf(flatSelected.toLowerCase());
+  if (startIndex === -1) return flatText.slice(0, 320);
+  const start = Math.max(0, startIndex - 180);
+  const end = Math.min(flatText.length, startIndex + flatSelected.length + 180);
+  const prefix = start > 0 ? "..." : "";
+  const suffix = end < flatText.length ? "..." : "";
+  return `${prefix}${flatText.slice(start, end).trim()}${suffix}`;
+}
+
+function buildSelectionTutorPrompt({ courseTitle, chapterTitle, lessonTitle, selectedText, selectedContext, userQuestion }) {
+  const lines = [
+    `Help me understand this selected part from my course on ${courseTitle}.`,
+    chapterTitle ? `Chapter: ${chapterTitle}` : "",
+    lessonTitle ? `Lesson: ${lessonTitle}` : "",
+    `Selected text: "${selectedText}"`,
+    selectedContext ? `Nearby context: ${selectedContext}` : "",
+    userQuestion ? `My specific doubt: ${userQuestion}` : "Please explain what this means, why it matters, and how I should think about it."
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
+function LessonText({ text, lessonIndexLabel, onSelectionAction }) {
   if (!text) return null;
+  let headingIndex = 0;
   return (
     <div className="lesson-text">
       {text.split("\n").map((line, i) => {
         if (!line.trim()) return <div key={i} className="lesson-spacer" />;
         const hMatch = line.match(/^(#{1,3})\s+(.+)/);
-        if (hMatch) return <div key={i} className={`lt-h lt-h${hMatch[1].length}`}>{parseInline(hMatch[2])}</div>;
-        if (line.match(/^[-*]\s+/)) return <div key={i} className="lt-bullet"><span className="lt-bullet-dot">—</span><span>{parseInline(line.replace(/^[-*]\s+/, ""))}</span></div>;
+        if (hMatch) {
+          const headingLabel = lessonIndexLabel ? `${lessonIndexLabel}${headingIndex + 1}` : "";
+          headingIndex += 1;
+          return (
+            <div
+              key={i}
+              className={`lt-h lt-h${hMatch[1].length}`}
+              data-lesson-line="true"
+              onMouseUp={onSelectionAction}
+              onTouchEnd={onSelectionAction}
+            >
+              {headingLabel && <span className="lt-section-num">{headingLabel}</span>}
+              {parseInline(hMatch[2])}
+            </div>
+          );
+        }
+        if (line.match(/^[-*]\s+/)) {
+          return (
+            <div
+              key={i}
+              className="lt-bullet"
+              data-lesson-line="true"
+              onMouseUp={onSelectionAction}
+              onTouchEnd={onSelectionAction}
+            >
+              <span className="lt-bullet-dot">—</span>
+              <span>{parseInline(line.replace(/^[-*]\s+/, ""))}</span>
+            </div>
+          );
+        }
         const nm = line.match(/^(\d+)\.\s+(.+)/);
-        if (nm) return <div key={i} className="lt-numbered"><span className="lt-num">{nm[1]}.</span><span>{parseInline(nm[2])}</span></div>;
-        return <p key={i} className="lt-para">{parseInline(line)}</p>;
+        if (nm) {
+          return (
+            <div
+              key={i}
+              className="lt-numbered"
+              data-lesson-line="true"
+              onMouseUp={onSelectionAction}
+              onTouchEnd={onSelectionAction}
+            >
+              <span className="lt-num">{nm[1]}.</span>
+              <span>{parseInline(nm[2])}</span>
+            </div>
+          );
+        }
+        return (
+          <p
+            key={i}
+            className="lt-para"
+            data-lesson-line="true"
+            onMouseUp={onSelectionAction}
+            onTouchEnd={onSelectionAction}
+          >
+            {parseInline(line)}
+          </p>
+        );
       })}
     </div>
   );
@@ -457,7 +556,7 @@ const STARTUP_LOADING_MESSAGES = [
   "Almost there...",
 ];
 
-function AiTutorPanel({ courseTopic, level, currentTopic, allTopics, onClose, persistedMessages, onMessagesChange }) {
+function AiTutorPanel({ courseTopic, level, currentTopic, allTopics, onClose, persistedMessages, onMessagesChange, selectedContext, initialDraft = "", autoSendText = "" }) {
   useScrollLock();
 
   const makeWelcome = useCallback(() => ([{
@@ -477,6 +576,16 @@ function AiTutorPanel({ courseTopic, level, currentTopic, allTopics, onClose, pe
   const bodyRef = useRef(null);
   const inputRef = useRef(null);
   const styleObj = TEACHING_STYLES.find(s => s.id === style) || TEACHING_STYLES[0];
+
+  useEffect(() => {
+    setInput(initialDraft || "");
+  }, [initialDraft]);
+
+  useEffect(() => {
+    if (!autoSendText) return;
+    const timer = setTimeout(() => { sendMessage(autoSendText); }, 60);
+    return () => clearTimeout(timer);
+  }, [autoSendText]);
 
   useEffect(() => {
     if (onMessagesChange) onMessagesChange(messages);
@@ -513,6 +622,9 @@ function AiTutorPanel({ courseTopic, level, currentTopic, allTopics, onClose, pe
         messages: history.map(m => ({ role: m.role, content: m.content })),
         course_topic: courseTopic, current_topic: currentTopic || "",
         level, teaching_style: styleObj.prompt, all_topics: allTopics.slice(0, 20)
+        , selected_text: selectedContext?.selectedText || ""
+        , selected_context: selectedContext?.surroundingText || ""
+        , selection_question: selectedContext?.userQuestion || ""
       });
       setMessages(prev => [...prev, { role: "assistant", content: res.data.reply || "Sorry, try again.", id: Date.now() }]);
     } catch {
@@ -546,6 +658,13 @@ function AiTutorPanel({ courseTopic, level, currentTopic, allTopics, onClose, pe
           </button>
           {currentTopic && <div className="tutor-context-tag"><span>📍</span><span>{currentTopic}</span></div>}
         </div>
+        {selectedContext?.selectedText && (
+          <div className="tutor-selection-card">
+            <div className="tutor-selection-label">Selected lesson context</div>
+            <div className="tutor-selection-quote">"{selectedContext.selectedText}"</div>
+            {selectedContext.surroundingText && <div className="tutor-selection-meta">{selectedContext.surroundingText}</div>}
+          </div>
+        )}
         {showStyles && <div className="tutor-styles-grid">{TEACHING_STYLES.map(s => <button key={s.id} className={`tutor-style-chip ${style === s.id ? "tsc-active" : ""}`} onClick={() => { setStyle(s.id); setShowStyles(false); }}>{s.label}</button>)}</div>}
         <div className="tutor-body" ref={bodyRef}>
           {messages.map((msg) => (
@@ -574,6 +693,50 @@ function AiTutorFab({ onClick }) {
       <span className="tutor-fab-label">AI Tutor</span>
       <span className="tutor-fab-pulse" />
     </button>
+  );
+}
+
+function SelectionTutorBubble({ selection, composerOpen, composerValue, onComposerChange, onAskTutor, onAskWithQuestion, onClose }) {
+  if (!selection) return null;
+  return createPortal(
+    <div
+      className="selection-tutor-bubble"
+      style={{
+        top: Math.max(14, selection.top),
+        left: Math.max(14, selection.left),
+        transform: selection.placement === "above" ? "translateY(calc(-100% - 10px))" : "none",
+      }}
+      onMouseDown={(e) => e.preventDefault()}
+    >
+      <div className="selection-tutor-actions">
+        <button className="selection-tutor-main" onClick={onAskTutor}>Ask Tutor</button>
+        <button className="selection-tutor-plus" onClick={onAskWithQuestion} title="Ask a specific doubt">+</button>
+        <button className="selection-tutor-dismiss" onClick={onClose} title="Dismiss">✕</button>
+      </div>
+      {composerOpen && (
+        <div className="selection-inline-composer">
+          <div className="selection-question-label">Ask about this selection</div>
+          <div className="selection-question-quote">"{selection.selectedText}"</div>
+          <textarea
+            className="selection-question-input"
+            placeholder="Type your doubt here..."
+            value={composerValue}
+            onChange={(e) => onComposerChange(e.target.value)}
+            onInput={(e) => {
+              e.target.style.height = "auto";
+              e.target.style.height = `${Math.min(e.target.scrollHeight, 220)}px`;
+            }}
+            rows={1}
+            autoFocus
+          />
+          <div className="selection-question-actions">
+            <button className="selection-question-cancel" onClick={onClose}>Cancel</button>
+            <button className="selection-question-submit" onClick={onAskTutor} disabled={!composerValue.trim()}>Ask Tutor</button>
+          </div>
+        </div>
+      )}
+    </div>,
+    document.body
   );
 }
 
@@ -964,6 +1127,26 @@ function RecommendationPanel({ recommendations, classroomData, onConnectClassroo
             : <div className="rec-empty">Weak topics will appear after topic quiz activity. Keep attempting quizzes so the AI can identify what needs revision.</div>}
         </div>
         <div className="rec-card">
+          <div className="rec-card-label">Behavior Trigger</div>
+          {recommendations?.short_task
+            ? <div className="rec-line">{recommendations.short_task}</div>
+            : <div className="rec-empty">Short tasks appear after about 24 hours of inactivity and point you to the next best quick study action.</div>}
+        </div>
+        <div className="rec-card">
+          <div className="rec-card-label">Autonomous Revision Queue</div>
+          {revisionLessons.length > 0
+            ? revisionLessons.map((item) => (
+              <div key={`${item.topic}-${item.updated_at}`} className="rec-revision-row">
+                <div>
+                  <div className="rec-revision-title">{item.topic}</div>
+                  <div className="rec-revision-sub">{item.trigger_reason === "quiz_score_below_70" ? "Triggered by low quiz score" : "Triggered by weak mastery"}</div>
+                </div>
+                <button className="rec-mini-btn" onClick={() => onOpenRevisionTopic?.(item.topic)}>Review</button>
+              </div>
+            ))
+            : <div className="rec-empty">Revision lessons will appear here when weak areas are detected from quiz performance. Keep giving topic quizzes so the AI can learn what to revisit.</div>}
+        </div>
+        <div className="rec-card">
           <div className="rec-card-label">Priority Path</div>
           {priorityPath.length > 0
             ? priorityPath.map((item, index) => (
@@ -973,12 +1156,6 @@ function RecommendationPanel({ recommendations, classroomData, onConnectClassroo
               </div>
             ))
             : <div className="rec-empty">No reordered path yet.</div>}
-        </div>
-        <div className="rec-card">
-          <div className="rec-card-label">Behavior Trigger</div>
-          {recommendations?.short_task
-            ? <div className="rec-line">{recommendations.short_task}</div>
-            : <div className="rec-empty">Short tasks appear after about 24 hours of inactivity and point you to the next best quick study action.</div>}
         </div>
         {!hideClassroom && (
           <div className="rec-card">
@@ -1002,25 +1179,17 @@ function RecommendationPanel({ recommendations, classroomData, onConnectClassroo
               )}
           </div>
         )}
-        <div className="rec-card rec-card-wide">
-          <div className="rec-card-label">Autonomous Revision Queue</div>
-          {revisionLessons.length > 0
-            ? revisionLessons.map((item) => (
-              <div key={`${item.topic}-${item.updated_at}`} className="rec-revision-row">
-                <div>
-                  <div className="rec-revision-title">{item.topic}</div>
-                  <div className="rec-revision-sub">{item.trigger_reason === "quiz_score_below_70" ? "Triggered by low quiz score" : "Triggered by weak mastery"}</div>
-                </div>
-                <button className="rec-mini-btn" onClick={() => onOpenRevisionTopic?.(item.topic)}>Review</button>
-              </div>
-            ))
-            : <div className="rec-empty">Revision lessons will appear here when weak areas are detected from quiz performance. Keep giving topic quizzes so the AI can learn what to revisit.</div>}
-        </div>
-        <div className="rec-card rec-card-wide">
-          <div className="rec-card-label">Tracking Note</div>
-          <div className="rec-line">{recommendations?.tracking_hint || "Keep taking topic quizzes so the AI can detect weak topics, adapt your path, and generate targeted revision."}</div>
-        </div>
       </div>
+    </div>
+  );
+}
+
+function TrackingHintBar({ hint }) {
+  if (!hint) return null;
+  return (
+    <div className="tracking-hint-bar">
+      <div className="tracking-hint-label">Tracking Note</div>
+      <div className="tracking-hint-text">{hint}</div>
     </div>
   );
 }
@@ -1468,13 +1637,13 @@ function QuizModal({ rawQuiz, moduleName, courseTopic, level, allTopics, onClose
 }
 
 // ─── Compact Bar ──────────────────────────────────────────────────────────────
-function ClassroomStatusWidget({ visible, onShowNotifications, disclaimerOpen, onToggleDisclaimer }) {
+function ClassroomStatusWidget({ visible, onShowNotifications, disclaimerOpen, onToggleDisclaimer, isMock }) {
   if (!visible) return null;
   return (
     <div className="classroom-status-wrap">
       <button className="classroom-status-pill classroom-status-pill-btn" onClick={onShowNotifications}>Google Classroom Connected</button>
-      <button className="classroom-status-info-btn" onClick={onToggleDisclaimer}>Mock</button>
-      {disclaimerOpen && <div className="classroom-status-disclaimer">This is a mock Google Classroom for showing the concept. Real Classroom will be connected soon.</div>}
+      <button className="classroom-status-info-btn" onClick={onToggleDisclaimer}>{isMock ? "Mock" : "Live"}</button>
+      {disclaimerOpen && <div className="classroom-status-disclaimer">{isMock ? "This connection is using mock classroom data for demonstration." : "Google Classroom is connected with read-only access. Course data, coursework, and announcements are synced from your real classroom account."}</div>}
     </div>
   );
 }
@@ -1483,6 +1652,19 @@ function ThemeToggle({ darkMode, onToggle }) {
   return (
     <button className="theme-toggle-btn" onClick={onToggle} title={darkMode ? "Switch to light mode" : "Switch to dark mode"}>
       <span>{darkMode ? "Light" : "Dark"}</span>
+    </button>
+  );
+}
+
+function ClassroomAccessButton({ connected, loading, onClick, compact = false }) {
+  return (
+    <button
+      className={`classroom-access-btn ${compact ? "classroom-access-btn-compact" : ""} ${connected ? "cab-connected" : ""}`}
+      onClick={onClick}
+      disabled={loading}
+      title={connected ? "Open Google Classroom panel" : "Connect Google Classroom"}
+    >
+      {loading ? "Connecting…" : connected ? "Google Classroom" : "Connect Classroom"}
     </button>
   );
 }
@@ -1497,11 +1679,7 @@ function ClassroomLiveToasts({ alerts, visible, resetKey }) {
     }
     const source = alerts?.length
       ? alerts.map((alert, index) => ({ id: `${alert.assignment || "alert"}-${index}`, message: alert.message }))
-      : [
-          { id: "fake-deadline", message: "Assignment deadline approaching. Your DSA worksheet is due in 2 days." },
-          { id: "fake-exam", message: "Exam reminder. Your Set Theory exam may be in 3 days." },
-          { id: "fake-assignment", message: "New study reminder. Please revise Linked Lists tonight." },
-        ];
+      : [];
     setItems(source);
   }, [alerts, visible, resetKey]);
 
@@ -1527,7 +1705,7 @@ function ClassroomLiveToasts({ alerts, visible, resetKey }) {
   );
 }
 
-function CompactBar({ topic, setTopic, level, setLevel, goal, setGoal, useClassroomData, setUseClassroomData, classroomConnected, onConnectClassroom, classroomLoading, onGenerate, loading, onProfileOpen, profileCount, showClassroomStatus, darkMode, onToggleTheme, onGoHome, onShowNotifications, disclaimerOpen, onToggleDisclaimer }) {
+function CompactBar({ topic, setTopic, level, setLevel, goal, setGoal, useClassroomData, setUseClassroomData, classroomConnected, onConnectClassroom, classroomLoading, onOpenClassroomPanel, onGenerate, loading, onProfileOpen, profileCount, showClassroomStatus, darkMode, onToggleTheme, onGoHome, onShowNotifications, disclaimerOpen, onToggleDisclaimer, classroomIsMock }) {
   return (
     <div className="compact-bar">
       <div className="compact-inner">
@@ -1543,9 +1721,9 @@ function CompactBar({ topic, setTopic, level, setLevel, goal, setGoal, useClassr
           <input type="checkbox" checked={useClassroomData && classroomConnected} onChange={e => setUseClassroomData(e.target.checked)} disabled={!classroomConnected} />
           <span>Use Classroom Data</span>
         </label>
-        {!classroomConnected && <button className="classroom-connect-btn compact-classroom-btn" onClick={onConnectClassroom} disabled={classroomLoading}>{classroomLoading ? "Connecting…" : "Connect Classroom"}</button>}
+        <ClassroomAccessButton connected={classroomConnected} loading={classroomLoading} onClick={onOpenClassroomPanel} compact />
         <button className="compact-generate-btn" onClick={onGenerate} disabled={loading || !topic.trim()}>{loading ? <span className="spin spin-white" /> : "Build Course"}</button>
-        <ClassroomStatusWidget visible={showClassroomStatus} onShowNotifications={onShowNotifications} disclaimerOpen={disclaimerOpen} onToggleDisclaimer={onToggleDisclaimer} />
+        <ClassroomStatusWidget visible={showClassroomStatus} onShowNotifications={onShowNotifications} disclaimerOpen={disclaimerOpen} onToggleDisclaimer={onToggleDisclaimer} isMock={classroomIsMock} />
         <ThemeToggle darkMode={darkMode} onToggle={onToggleTheme} />
         <button className="navbar-profile compact-profile" onClick={onProfileOpen} title="My Profile">
           <span className="navbar-profile-ring" />
@@ -1557,13 +1735,14 @@ function CompactBar({ topic, setTopic, level, setLevel, goal, setGoal, useClassr
 }
 
 // ─── Hero Input ───────────────────────────────────────────────────────────────
-function HeroInput({ topic, setTopic, level, setLevel, goal, setGoal, useClassroomData, setUseClassroomData, classroomConnected, onConnectClassroom, classroomLoading, onGenerate, loading, onProfileOpen, profileCount, generateError, showClassroomStatus, darkMode, onToggleTheme, onGoHome, onShowNotifications, disclaimerOpen, onToggleDisclaimer }) {
+function HeroInput({ topic, setTopic, level, setLevel, goal, setGoal, useClassroomData, setUseClassroomData, classroomConnected, onConnectClassroom, classroomLoading, onOpenClassroomPanel, onGenerate, loading, onProfileOpen, profileCount, generateError, showClassroomStatus, darkMode, onToggleTheme, onGoHome, onShowNotifications, disclaimerOpen, onToggleDisclaimer, classroomIsMock }) {
   return (
     <div className="hero-wrap">
       <nav className="navbar">
         <button className="navbar-kiri-logo navbar-kiri-btn" onClick={onGoHome}>KIRIGUMI</button>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <ClassroomStatusWidget visible={showClassroomStatus} onShowNotifications={onShowNotifications} disclaimerOpen={disclaimerOpen} onToggleDisclaimer={onToggleDisclaimer} />
+          <ClassroomAccessButton connected={classroomConnected} loading={classroomLoading} onClick={onOpenClassroomPanel} />
+          <ClassroomStatusWidget visible={showClassroomStatus} onShowNotifications={onShowNotifications} disclaimerOpen={disclaimerOpen} onToggleDisclaimer={onToggleDisclaimer} isMock={classroomIsMock} />
           <ThemeToggle darkMode={darkMode} onToggle={onToggleTheme} />
           <button className="navbar-profile" onClick={onProfileOpen} title="My Profile">
             <span className="navbar-profile-ring" />
@@ -1639,21 +1818,22 @@ function ClassroomAdvisory({ classroomConnected }) {
   return (
     <div className="classroom-advisory">
       <div className="classroom-advisory-title">
-        {classroomConnected ? "Google Classroom Demo Connected" : "Google Classroom Demo"}
+        {classroomConnected ? "Google Classroom Connected" : "Google Classroom Integration"}
       </div>
       <p className="classroom-advisory-text">
-        This is currently a simulated Google Classroom integration to demonstrate the concept and usefulness. Live Classroom sync will be added in the next few days.
+        Connect your Google Classroom account to bring in real courses, assignments, and announcements with read-only access.
       </p>
       <p className="classroom-advisory-text">
-        Classroom-based prioritization only helps when matching material, assignments, or deadlines exist for your entered topic or subject. If there is no matching classroom material, the course content comes directly from the AI.
+        Once connected, Kirigumi can use deadlines and coursework metadata to suggest what to study next and generate AI help around your real academic workload.
       </p>
     </div>
   );
 }
 
-function ClassroomSnapshotCard({ classroomData, onConnectClassroom, classroomLoading }) {
+function ClassroomSnapshotCard({ classroomData, onConnectClassroom, classroomLoading, onOpenWorkspace }) {
   const alerts = classroomData?.alerts || [];
   const assignments = classroomData?.assignments || [];
+  const notifications = classroomData?.notifications || { urgent: [], upcoming: [], overdue: [] };
 
   return (
     <div className="home-classroom-card">
@@ -1661,21 +1841,31 @@ function ClassroomSnapshotCard({ classroomData, onConnectClassroom, classroomLoa
         <div>
           <div className="home-classroom-eyebrow">Google Classroom</div>
           <div className="home-classroom-title">
-            {classroomData?.connected ? "Connected classroom snapshot" : "Connect mock classroom data"}
+            {classroomData?.connected ? "Connected classroom workspace" : "Connect Google Classroom"}
           </div>
         </div>
-        {!classroomData?.connected && (
+        {!classroomData?.connected ? (
           <button className="classroom-connect-btn" onClick={onConnectClassroom} disabled={classroomLoading}>
             {classroomLoading ? "Connecting…" : "Connect Google Classroom"}
           </button>
+        ) : (
+          <button className="classroom-connect-btn" onClick={onOpenWorkspace}>Open Workspace</button>
         )}
       </div>
       <ClassroomAdvisory classroomConnected={!!classroomData?.connected} />
       {classroomData?.connected && (
         <div className="home-classroom-grid">
           <div className="home-classroom-block">
-            <div className="home-classroom-block-label">Urgent Alerts</div>
-            {alerts.length > 0
+            <div className="home-classroom-block-label">Urgent & Overdue</div>
+            {[...(notifications.overdue || []), ...(notifications.urgent || [])].length > 0
+              ? [...(notifications.overdue || []), ...(notifications.urgent || [])].slice(0, 3).map((alert, index) => (
+                <div key={`${alert.id || alert.title}-${index}`} className="home-classroom-alert">
+                  <strong>{alert.title}</strong>
+                  <span>{alert.course_name || "Google Classroom"}</span>
+                  <span>{alert.due_at ? `Due ${new Date(alert.due_at).toLocaleString()}` : "Due date unavailable"}</span>
+                </div>
+              ))
+              : alerts.length > 0
               ? alerts.slice(0, 3).map((alert) => (
                 <div key={`${alert.assignment}-${alert.days_until_due}`} className="home-classroom-alert">
                   {alert.message}
@@ -1701,8 +1891,184 @@ function ClassroomSnapshotCard({ classroomData, onConnectClassroom, classroomLoa
   );
 }
 
+function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId, coursework, announcements, insights, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onConnectClassroom }) {
+  const selectedCourse = classroomCourses.find((course) => course.id === selectedCourseId) || null;
+  const notifications = classroomData?.notifications || { urgent: [], upcoming: [], overdue: [] };
+
+  return (
+    <div className="classroom-workspace">
+      <div className="classroom-workspace-sidebar">
+        <div className="cw-section-eyebrow">Courses</div>
+        {!classroomData?.connected ? (
+          <div className="cw-empty-card">
+            <div className="cw-empty-text">Connect Google Classroom to see your courses here.</div>
+            <button className="classroom-connect-btn" onClick={onConnectClassroom}>Connect Google Classroom</button>
+          </div>
+        ) : loadingCourses ? (
+          <div className="cw-empty-card"><span className="spin spin-sm" /> Loading courses…</div>
+        ) : classroomCourses.length > 0 ? (
+          <div className="cw-course-list">
+            {classroomCourses.map((course) => (
+              <button
+                key={course.id}
+                className={`cw-course-item ${selectedCourseId === course.id ? "cw-course-item-active" : ""}`}
+                onClick={() => onSelectCourse(course.id)}
+              >
+                <div className="cw-course-name">{course.name}</div>
+                <div className="cw-course-section">{course.section || "General"}</div>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="cw-empty-card">No active Classroom courses were found.</div>
+        )}
+      </div>
+
+      <div className="classroom-workspace-main">
+        <div className="cw-header">
+          <div>
+            <div className="cw-section-eyebrow">Dashboard</div>
+            <div className="cw-title">{selectedCourse?.name || "Choose a classroom course"}</div>
+            <div className="cw-subtitle">{selectedCourse ? (selectedCourse.section || "No section") : "Select a course from the sidebar to load coursework and announcements."}</div>
+          </div>
+          <button className="cw-study-btn" onClick={() => onAnalyze(selectedCourseId)} disabled={!classroomData?.connected || analyzing}>
+            {analyzing ? "Analyzing…" : "Study with AI"}
+          </button>
+        </div>
+
+        {error && <div className="hero-error">{error}</div>}
+
+        <div className="cw-grid">
+          <div className="cw-card">
+            <div className="cw-card-label">Notifications</div>
+            {[...(notifications.overdue || []), ...(notifications.urgent || []), ...(notifications.upcoming || [])].length > 0 ? (
+              [...(notifications.overdue || []), ...(notifications.urgent || []), ...(notifications.upcoming || [])].slice(0, 5).map((item, index) => (
+                <div key={`${item.id || item.title}-${index}`} className="cw-line">
+                  <strong>{item.title}</strong>
+                  <span>{item.course_name || "Classroom"}</span>
+                </div>
+              ))
+            ) : (
+              <div className="rec-empty">Deadlines and reminders will appear here after sync.</div>
+            )}
+          </div>
+
+          <div className="cw-card">
+            <div className="cw-card-label">Assignments</div>
+            {loadingDetails ? (
+              <div className="cw-empty-card"><span className="spin spin-sm" /> Loading course details…</div>
+            ) : coursework.length > 0 ? (
+              coursework.map((item) => (
+                <div key={item.id} className="cw-assignment-card">
+                  <div className="cw-assignment-title">{item.title}</div>
+                  <div className="cw-assignment-meta">{item.due_at ? new Date(item.due_at).toLocaleString() : "No due date"}</div>
+                  {item.description && <div className="cw-assignment-desc">{item.description}</div>}
+                </div>
+              ))
+            ) : (
+              <div className="rec-empty">Select a course to view coursework.</div>
+            )}
+          </div>
+
+          <div className="cw-card">
+            <div className="cw-card-label">Announcements</div>
+            {loadingDetails ? (
+              <div className="cw-empty-card"><span className="spin spin-sm" /> Loading announcements…</div>
+            ) : announcements.length > 0 ? (
+              announcements.map((item) => (
+                <div key={item.id} className="cw-assignment-card">
+                  <div className="cw-assignment-title">{item.text || "Announcement"}</div>
+                  <div className="cw-assignment-meta">{item.update_time ? new Date(item.update_time).toLocaleString() : "No timestamp"}</div>
+                </div>
+              ))
+            ) : (
+              <div className="rec-empty">Announcements for the selected course will appear here.</div>
+            )}
+          </div>
+
+          <div className="cw-card">
+            <div className="cw-card-label">AI Insights</div>
+            {insights ? (
+              <div className="cw-insights">
+                {insights.summary && <div className="cw-summary">{insights.summary}</div>}
+                {!!insights.study_plan?.length && (
+                  <div className="cw-block">
+                    <div className="cw-mini-label">Study Plan</div>
+                    {insights.study_plan.map((item, index) => <div key={`${item}-${index}`} className="cw-line">{index + 1}. {item}</div>)}
+                  </div>
+                )}
+                {!!insights.reminders?.length && (
+                  <div className="cw-block">
+                    <div className="cw-mini-label">Reminders</div>
+                    {insights.reminders.map((item, index) => <div key={`${item}-${index}`} className="cw-line">{item}</div>)}
+                  </div>
+                )}
+                {!!insights.key_topics?.length && (
+                  <div className="cw-block">
+                    <div className="cw-mini-label">Key Topics</div>
+                    <div className="cw-topic-chips">
+                      {insights.key_topics.map((item, index) => <span key={`${item}-${index}`} className="cw-topic-chip">{item}</span>)}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="rec-empty">Use “Study with AI” to turn your classroom data into a study plan, reminders, and key topics.</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ClassroomSidePanel({ open, onClose, classroomData, classroomCourses, selectedCourseId, coursework, announcements, insights, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onConnectClassroom }) {
+  useScrollLock();
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div className="gc-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="gc-panel">
+        <div className="gc-header">
+          <div>
+            <div className="rec-eyebrow">Google Classroom</div>
+            <div className="gc-title">Classroom Workspace</div>
+            <div className="gc-subtitle">Courses, assignments, announcements, and AI study help in one place.</div>
+          </div>
+          <button className="qm-close-btn" onClick={onClose}>✕</button>
+        </div>
+        <div className="gc-body">
+          <ClassroomWorkspace
+            classroomData={classroomData}
+            classroomCourses={classroomCourses}
+            selectedCourseId={selectedCourseId}
+            coursework={coursework}
+            announcements={announcements}
+            insights={insights}
+            loadingCourses={loadingCourses}
+            loadingDetails={loadingDetails}
+            analyzing={analyzing}
+            error={error}
+            onSelectCourse={onSelectCourse}
+            onAnalyze={onAnalyze}
+            onConnectClassroom={onConnectClassroom}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Inline Lesson ────────────────────────────────────────────────────────────
-function InlineLesson({ lesson, lessonVideos, webResources, webResourcesError, suggestion, isCompleted, onToggleComplete, skipTypewriter, onTyped, onOpenQuiz, hasQuiz }) {
+function InlineLesson({ lesson, lessonVideos, webResources, webResourcesError, suggestion, isCompleted, onToggleComplete, skipTypewriter, onTyped, onOpenQuiz, hasQuiz, lessonIndexLabel, onLessonSelection }) {
   const { displayed, done: typeDone } = useTypewriter(lesson, 6, skipTypewriter);
   const getYoutubeId = (url) => { if (!url) return null; const m = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&]+)/); return m ? m[1] : null; };
   useEffect(() => { if (typeDone && !skipTypewriter && onTyped) onTyped(); }, [typeDone, skipTypewriter, onTyped]);
@@ -1713,7 +2079,7 @@ function InlineLesson({ lesson, lessonVideos, webResources, webResourcesError, s
         <div className="il-eyebrow">Lesson</div>
         {/* White card with pencil-style handwritten text */}
         <div className="il-lesson-card">
-          <div className="il-body"><LessonText text={displayed} />{!typeDone && <span className="cursor-blink">▌</span>}</div>
+          <div className="il-body"><LessonText text={displayed} lessonIndexLabel={lessonIndexLabel} onSelectionAction={onLessonSelection} />{!typeDone && <span className="cursor-blink">▌</span>}</div>
         </div>
         <div className="il-actions">
           <button className={`il-btn ${isCompleted ? "il-btn-done" : "il-btn-complete"}`} onClick={onToggleComplete}>{isCompleted ? "✓ Completed — Undo?" : "Mark Complete"}</button>
@@ -1778,7 +2144,7 @@ function ShortTaskToast({ message, onDismiss }) {
 }
 
 // ─── Chapter Section ──────────────────────────────────────────────────────────
-function ChapterSection({ chapter, chapterIndex, completedLessons, onToggleComplete, lessonCache, typedTopics, topic, level, onOpenQuiz, expandedTopics, onTopicExpand, ensureLessonLoaded, masteryMap, nextRecommended }) {
+function ChapterSection({ chapter, chapterIndex, completedLessons, onToggleComplete, lessonCache, typedTopics, topic, level, onOpenQuiz, expandedTopics, onTopicExpand, ensureLessonLoaded, masteryMap, nextRecommended, onLessonSelection, courseTitle }) {
   const [open, setOpen] = useState(true);
   const [loadingTopics, setLoadingTopics] = useState(new Set());
   const doneCount = chapter.topics.filter(t => completedLessons.includes(t)).length;
@@ -1807,7 +2173,7 @@ function ChapterSection({ chapter, chapterIndex, completedLessons, onToggleCompl
   return (
     <div className={`ch-section ${allDone ? "ch-all-done" : ""}`}>
       <button className="ch-header" onClick={() => setOpen(o => !o)}>
-        <span className="ch-num">{allDone ? "✓" : String(chapterIndex + 1).padStart(2, "0")}</span>
+        <span className="ch-num">{String(chapterIndex + 1).padStart(2, "0")}</span>
         <span className="ch-title">{chapter.title}</span>
         <span className="ch-meta">{doneCount}/{chapter.topics.length}</span>
         <span className="ch-chevron" style={{ transform: open ? "rotate(90deg)" : "rotate(0)" }}>›</span>
@@ -1821,10 +2187,11 @@ function ChapterSection({ chapter, chapterIndex, completedLessons, onToggleCompl
             const cached = lessonCache.current[topicItem];
             const alreadyTyped = typedTopics.current.has(topicItem);
             const isRecommended = nextRecommended && topicItem === nextRecommended;
+            const lessonIndexLabel = getLessonIndexLabel(chapterIndex, idx);
             return (
               <div key={idx} className="topic-block">
                 <div data-topic-name={topicItem} className={`topic-row ${done ? "t-done" : ""} ${isExpanded ? "t-active" : ""} ${isRecommended ? "t-recommended" : ""}`} onClick={() => toggleTopic(topicItem)}>
-                  <span className="t-dot">{done ? "✓" : isExpanded ? "▸" : isRecommended ? "→" : "◦"}</span>
+                  <span className="t-dot">{lessonIndexLabel}</span>
                   <span className="t-name">{topicItem}</span>
                   {isRecommended && !done && <span className="t-badge" style={{ color: "var(--accent)", background: "var(--accent-dim)", border: "1px solid var(--accent-mid)", fontWeight: 700, fontSize: "8px" }}>AI RECOMMENDS</span>}
                   {getMasteryBadge(topicItem)}
@@ -1845,6 +2212,14 @@ function ChapterSection({ chapter, chapterIndex, completedLessons, onToggleCompl
                     isCompleted={done} onToggleComplete={() => onToggleComplete(topicItem)}
                     skipTypewriter={alreadyTyped} onTyped={() => typedTopics.current.add(topicItem)}
                     onOpenQuiz={() => onOpenQuiz(topicItem)} hasQuiz={!!cached.quiz}
+                    lessonIndexLabel={lessonIndexLabel}
+                    onLessonSelection={() => onLessonSelection?.({
+                      chapterTitle: chapter.title,
+                      lessonTitle: topicItem,
+                      courseTitle,
+                      lessonIndexLabel,
+                      lessonText: cached.lesson,
+                    })}
                   />
                 )}
               </div>
@@ -1875,6 +2250,12 @@ export default function Home() {
   const [profileCourses, setProfileCourses] = useState([]);
   const [tutorOpen, setTutorOpen] = useState(false);
   const [tutorMessages, setTutorMessages] = useState([]);
+  const [tutorContext, setTutorContext] = useState(null);
+  const [tutorDraft, setTutorDraft] = useState("");
+  const [tutorAutoSend, setTutorAutoSend] = useState("");
+  const [selectionBubble, setSelectionBubble] = useState(null);
+  const [selectionQuestionOpen, setSelectionQuestionOpen] = useState(false);
+  const [selectionQuestion, setSelectionQuestion] = useState("");
   const [expandedTopics, setExpandedTopics] = useState(new Set());
 
   // Auth state
@@ -1885,7 +2266,17 @@ export default function Home() {
   const [generateError, setGenerateError] = useState("");
   const [recommendations, setRecommendations] = useState(null);
   const [classroomData, setClassroomData] = useState(null);
+  const [classroomPanelOpen, setClassroomPanelOpen] = useState(false);
+  const [classroomCourses, setClassroomCourses] = useState([]);
+  const [classroomSelectedCourseId, setClassroomSelectedCourseId] = useState("");
+  const [classroomCoursework, setClassroomCoursework] = useState([]);
+  const [classroomAnnouncements, setClassroomAnnouncements] = useState([]);
+  const [classroomInsights, setClassroomInsights] = useState(null);
   const [classroomLoading, setClassroomLoading] = useState(false);
+  const [classroomWorkspaceLoading, setClassroomWorkspaceLoading] = useState(false);
+  const [classroomDetailsLoading, setClassroomDetailsLoading] = useState(false);
+  const [classroomAnalyzeLoading, setClassroomAnalyzeLoading] = useState(false);
+  const [classroomError, setClassroomError] = useState("");
   const [useClassroomData, setUseClassroomData] = useState(false);
   const [classroomInfoOpen, setClassroomInfoOpen] = useState(false);
   const [classroomToastTick, setClassroomToastTick] = useState(0);
@@ -2038,21 +2429,71 @@ export default function Home() {
       return;
     }
     setClassroomLoading(true);
+    window.location.href = `${API_BASE}/auth/google`;
+  }, [currentUser, topic, activeTopic, activeLevel, course, refreshRecommendations]);
+
+  const loadWorkspaceCourses = useCallback(async (prefillCourseId = "") => {
+    if (!currentUser || !classroomData?.connected) return;
+    setClassroomWorkspaceLoading(true);
+    setClassroomError("");
     try {
-      const data = await connectClassroom(topic || activeTopic || "General Studies");
-      setClassroomData(data);
-      setUseClassroomData(true);
-      setClassroomInfoOpen(true);
-      setClassroomToastTick((prev) => prev + 1);
-      if (course && activeTopic) {
-        await refreshRecommendations(activeTopic, activeLevel, getAllTopics(course), true);
-      }
+      const data = await loadClassroomCourses();
+      const courses = data.courses || [];
+      setClassroomCourses(courses);
+      const nextCourseId = prefillCourseId || classroomSelectedCourseId || courses[0]?.id || "";
+      if (nextCourseId) setClassroomSelectedCourseId(nextCourseId);
     } catch (e) {
       console.error(e);
+      setClassroomError(getErrorMessage(e, "Could not load Google Classroom courses right now."));
     } finally {
-      setClassroomLoading(false);
+      setClassroomWorkspaceLoading(false);
     }
-  }, [currentUser, topic, activeTopic, activeLevel, course, refreshRecommendations]);
+  }, [currentUser, classroomData?.connected, classroomSelectedCourseId]);
+
+  const loadCourseDetails = useCallback(async (courseId) => {
+    if (!courseId || !currentUser) return;
+    setClassroomDetailsLoading(true);
+    setClassroomError("");
+    try {
+      const [workRes, annRes] = await Promise.all([loadClassroomCoursework(courseId), loadClassroomAnnouncements(courseId)]);
+      setClassroomCoursework(workRes.coursework || []);
+      setClassroomAnnouncements(annRes.announcements || []);
+      setClassroomSelectedCourseId(courseId);
+    } catch (e) {
+      console.error(e);
+      setClassroomError(getErrorMessage(e, "Could not load classroom details right now."));
+    } finally {
+      setClassroomDetailsLoading(false);
+    }
+  }, [currentUser]);
+
+  const handleAnalyzeClassroom = useCallback(async (courseId = classroomSelectedCourseId) => {
+    if (!currentUser || !classroomData?.connected) return;
+    setClassroomAnalyzeLoading(true);
+    setClassroomError("");
+    try {
+      const data = await analyzeClassroom(courseId || "");
+      setClassroomInsights(data.insights || null);
+    } catch (e) {
+      console.error(e);
+      setClassroomError(getErrorMessage(e, "Could not analyze classroom data right now."));
+    } finally {
+      setClassroomAnalyzeLoading(false);
+    }
+  }, [currentUser, classroomData?.connected, classroomSelectedCourseId]);
+
+  const handleOpenClassroomPanel = useCallback(() => {
+    if (!currentUser) {
+      setShowAuth(true);
+      return;
+    }
+    if (!classroomData?.connected) {
+      handleConnectClassroom();
+      return;
+    }
+    loadWorkspaceCourses(classroomSelectedCourseId);
+    setClassroomPanelOpen(true);
+  }, [currentUser, classroomData?.connected, handleConnectClassroom, loadWorkspaceCourses, classroomSelectedCourseId]);
 
   useEffect(() => {
     refreshProfileCourses();
@@ -2062,18 +2503,65 @@ export default function Home() {
     const hydrateClassroom = async () => {
       if (!currentUser) {
         setClassroomData(null);
+        setClassroomCourses([]);
+        setClassroomSelectedCourseId("");
+        setClassroomCoursework([]);
+        setClassroomAnnouncements([]);
+        setClassroomInsights(null);
         setUseClassroomData(false);
         return;
       }
       try {
         const data = await loadClassroomData();
         setClassroomData(data);
+        setUseClassroomData((prev) => prev && !!data?.connected);
       } catch {
         setClassroomData(null);
       }
     };
     hydrateClassroom();
   }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    const params = new URLSearchParams(window.location.search);
+    const classroomState = params.get("classroom");
+    if (!classroomState) return;
+    const finalize = async () => {
+      if (classroomState === "connected") {
+        try {
+          const data = await refreshClassroomData();
+          setClassroomData(data);
+          setUseClassroomData(true);
+          setClassroomInfoOpen(true);
+          setClassroomToastTick((prev) => prev + 1);
+          if (course && activeTopic) {
+            await refreshRecommendations(activeTopic, activeLevel, getAllTopics(course), true);
+          }
+        } catch (e) {
+          console.error(e);
+          setClassroomError(getErrorMessage(e, "Google Classroom connected, but sync failed."));
+        }
+      } else if (classroomState === "error") {
+        setClassroomError("Google Classroom connection was cancelled or failed.");
+      }
+      params.delete("classroom");
+      params.delete("reason");
+      const next = params.toString();
+      window.history.replaceState({}, "", `${window.location.pathname}${next ? `?${next}` : ""}`);
+    };
+    finalize();
+  }, [currentUser, course, activeTopic, activeLevel, refreshRecommendations]);
+
+  useEffect(() => {
+    if (!classroomData?.connected) return;
+    loadWorkspaceCourses();
+  }, [classroomData?.connected, loadWorkspaceCourses]);
+
+  useEffect(() => {
+    if (!classroomSelectedCourseId || !classroomData?.connected) return;
+    loadCourseDetails(classroomSelectedCourseId);
+  }, [classroomSelectedCourseId, classroomData?.connected, loadCourseDetails]);
 
   useEffect(() => {
     try {
@@ -2119,6 +2607,7 @@ export default function Home() {
       const state = e.state;
       if (!state || state.view === "home") {
         setCourse(null); setViewState("home"); setQuizModal(null); setTutorOpen(false);
+        setTutorContext(null); setTutorDraft(""); setTutorAutoSend("");
         setRecommendations(null); setRevisionAlert(null);
         setExpandedTopics(new Set());
         lessonCache.current = {}; typedTopics.current = new Set();
@@ -2176,6 +2665,7 @@ export default function Home() {
     if (!topic.trim()) return;
     setLoading(true); setCourse(null); setQuizModal(null); setViewState("home");
     setTutorMessages([]); setExpandedTopics(new Set());
+    setTutorContext(null); setTutorDraft(""); setTutorAutoSend("");
     setRevisionAlert(null); setShortTaskToast(null);
     setGenerateError("");
     lessonCache.current = {}; typedTopics.current = new Set();
@@ -2221,6 +2711,7 @@ export default function Home() {
   const handleNavigateToCourse = async (savedCourse) => {
     setLoading(true); setTopic(savedCourse.topic); setLevel(savedCourse.level);
     setTutorMessages([]); setExpandedTopics(new Set());
+    setTutorContext(null); setTutorDraft(""); setTutorAutoSend("");
     setRevisionAlert(null);
     lessonCache.current = {}; typedTopics.current = new Set();
     try {
@@ -2240,6 +2731,9 @@ export default function Home() {
     setViewState("home");
     setQuizModal(null);
     setTutorOpen(false);
+    setTutorContext(null);
+    setTutorDraft("");
+    setTutorAutoSend("");
     setRecommendations(null);
     setRevisionAlert(null);
     setExpandedTopics(new Set());
@@ -2315,6 +2809,79 @@ export default function Home() {
   const currentQuizText = quizModal ? lessonCache.current[quizModal.moduleTitle]?.quiz : null;
   const showHome = !course && !loading && !authLoading;
   const showCourse = course && !loading && !authLoading;
+
+  const closeSelectionUi = useCallback(() => {
+    setSelectionBubble(null);
+    setSelectionQuestionOpen(false);
+    setSelectionQuestion("");
+  }, []);
+
+  const openTutorWithSelection = useCallback((selectionPayload, withQuestion = "") => {
+    if (!selectionPayload?.selectedText) return;
+    const nextContext = {
+      ...selectionPayload,
+      userQuestion: withQuestion || "",
+    };
+    setTutorContext(nextContext);
+    setTutorOpen(true);
+    setSelectionBubble(null);
+    setSelectionQuestionOpen(false);
+    setSelectionQuestion("");
+    setTutorDraft(withQuestion || "");
+    setTutorAutoSend(buildSelectionTutorPrompt({
+      courseTitle: selectionPayload.courseTitle || activeTopic || "this course",
+      chapterTitle: selectionPayload.chapterTitle,
+      lessonTitle: selectionPayload.lessonTitle,
+      selectedText: selectionPayload.selectedText,
+      selectedContext: selectionPayload.surroundingText,
+      userQuestion: withQuestion,
+    }));
+  }, [activeTopic]);
+
+  const handleLessonSelection = useCallback((lessonMeta) => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      setSelectionBubble(null);
+      return;
+    }
+    const selectedText = selection.toString().replace(/\s+/g, " ").trim();
+    if (!selectedText) {
+      setSelectionBubble(null);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+    if (!rect.width && !rect.height) {
+      setSelectionBubble(null);
+      return;
+    }
+    const targetNode = range.commonAncestorContainer?.nodeType === 1 ? range.commonAncestorContainer : range.commonAncestorContainer?.parentElement;
+    if (!targetNode?.closest?.(".il-lesson-card")) {
+      setSelectionBubble(null);
+      return;
+    }
+    const surroundingText = buildSelectionContextSnippet(lessonMeta.lessonText, selectedText);
+    const estimatedComposerHeight = 220;
+    const placeAbove = rect.bottom + estimatedComposerHeight > window.innerHeight && rect.top > estimatedComposerHeight;
+    setSelectionBubble({
+      top: window.scrollY + (placeAbove ? rect.top : rect.bottom + 10),
+      left: window.scrollX + rect.left,
+      placement: placeAbove ? "above" : "below",
+      selectedText,
+      surroundingText,
+      ...lessonMeta,
+    });
+  }, []);
+
+  useEffect(() => {
+    const clearIfOutside = () => {
+      if (selectionQuestionOpen) return;
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed) setSelectionBubble(null);
+    };
+    document.addEventListener("selectionchange", clearIfOutside);
+    return () => document.removeEventListener("selectionchange", clearIfOutside);
+  }, [selectionQuestionOpen]);
 
   return (
     <>
@@ -2499,6 +3066,37 @@ export default function Home() {
         .classroom-status-pill-btn,
         .classroom-status-info-btn {
           cursor: pointer;
+        }
+        .classroom-access-btn {
+          min-width: 170px;
+          min-height: 42px;
+          padding: 10px 16px;
+          border-radius: 16px;
+          border: 1px solid var(--orange);
+          background: var(--orange-dim);
+          color: var(--orange);
+          font-family: var(--ff-mono);
+          font-size: 10px;
+          letter-spacing: .12em;
+          text-transform: uppercase;
+          cursor: pointer;
+          transition: transform .15s ease, background .2s ease, border-color .2s ease;
+        }
+        .classroom-access-btn:hover:not(:disabled) {
+          transform: translateY(-1px);
+          background: rgba(249,115,22,.12);
+        }
+        .classroom-access-btn:disabled { opacity: .6; cursor: not-allowed; }
+        .classroom-access-btn.cab-connected {
+          border-color: var(--accent-mid);
+          background: var(--accent-dim);
+          color: var(--accent);
+        }
+        .classroom-access-btn-compact {
+          min-width: 148px;
+          min-height: 36px;
+          padding: 8px 12px;
+          border-radius: 10px;
         }
         .classroom-status-pill-btn {
           border: 1px solid rgba(16,185,129,.22);
@@ -2842,6 +3440,186 @@ export default function Home() {
         .home-classroom-card {
           padding:22px;
           margin-top:-16px;
+        }
+        .classroom-workspace {
+          display:grid;
+          grid-template-columns:280px minmax(0, 1fr);
+          gap:16px;
+          margin-top:0;
+        }
+        .classroom-workspace-sidebar,
+        .classroom-workspace-main {
+          border:1px solid var(--border);
+          border-radius:20px;
+          background:rgba(255,255,255,.72);
+          box-shadow:0 18px 50px rgba(8,145,178,.08);
+        }
+        body.dark-mode .classroom-workspace-sidebar,
+        body.dark-mode .classroom-workspace-main {
+          background:rgba(255,255,255,.03);
+          box-shadow:none;
+        }
+        .classroom-workspace-sidebar { padding:18px; align-self:start; }
+        .classroom-workspace-main { padding:18px; min-width:0; }
+        .cw-section-eyebrow {
+          font-family:var(--ff-mono);
+          font-size:9px;
+          letter-spacing:.18em;
+          text-transform:uppercase;
+          color:var(--accent);
+          margin-bottom:12px;
+        }
+        .cw-course-list { display:flex; flex-direction:column; gap:10px; }
+        .cw-course-item {
+          width:100%;
+          text-align:left;
+          border:1px solid var(--border);
+          border-radius:14px;
+          padding:12px 14px;
+          background:var(--surface);
+          cursor:pointer;
+          transition:background .15s,border-color .15s,transform .15s;
+        }
+        .cw-course-item:hover { background:var(--surface2); transform:translateY(-1px); }
+        .cw-course-item-active { border-color:var(--accent-mid); background:var(--accent-dim); }
+        .cw-course-name { font-family:var(--ff-head); font-size:.92rem; font-weight:700; color:var(--text); }
+        .cw-course-section { font-size:.78rem; color:var(--text3); margin-top:4px; }
+        .cw-empty-card {
+          display:flex;
+          flex-direction:column;
+          gap:10px;
+          padding:14px;
+          border-radius:14px;
+          background:var(--surface);
+          color:var(--text2);
+          line-height:1.6;
+        }
+        .cw-empty-text { color:var(--text2); }
+        .cw-header {
+          display:flex;
+          align-items:flex-start;
+          justify-content:space-between;
+          gap:16px;
+          margin-bottom:16px;
+        }
+        .cw-title { font-family:var(--ff-head); font-size:1.2rem; font-weight:800; color:var(--text); }
+        .cw-subtitle { margin-top:6px; color:var(--text3); line-height:1.55; font-size:.88rem; }
+        .cw-study-btn {
+          border:none;
+          border-radius:12px;
+          padding:11px 16px;
+          background:linear-gradient(135deg,var(--accent),var(--accent-mid));
+          color:#fff;
+          font-family:var(--ff-head);
+          font-size:.9rem;
+          font-weight:800;
+          cursor:pointer;
+          flex-shrink:0;
+        }
+        .cw-study-btn:disabled { opacity:.55; cursor:not-allowed; }
+        .cw-grid {
+          display:grid;
+          grid-template-columns:repeat(2, minmax(0, 1fr));
+          gap:14px;
+        }
+        .cw-card {
+          border:1px solid var(--border);
+          border-radius:16px;
+          padding:16px;
+          background:var(--surface);
+          min-width:0;
+        }
+        .cw-card-label,
+        .cw-mini-label {
+          font-family:var(--ff-mono);
+          font-size:9px;
+          letter-spacing:.18em;
+          text-transform:uppercase;
+          color:var(--text3);
+          margin-bottom:10px;
+        }
+        .cw-assignment-card,
+        .cw-line {
+          display:flex;
+          flex-direction:column;
+          gap:4px;
+          padding:11px 12px;
+          border-radius:12px;
+          background:rgba(255,255,255,.6);
+          margin-bottom:8px;
+          color:var(--text);
+          line-height:1.5;
+        }
+        body.dark-mode .cw-assignment-card,
+        body.dark-mode .cw-line { background:rgba(255,255,255,.04); }
+        .cw-assignment-title { font-weight:700; color:var(--text); }
+        .cw-assignment-meta { color:var(--text3); font-size:.78rem; }
+        .cw-assignment-desc { color:var(--text2); font-size:.84rem; line-height:1.55; }
+        .cw-insights { display:flex; flex-direction:column; gap:12px; }
+        .cw-summary { color:var(--text2); line-height:1.65; }
+        .cw-block { display:flex; flex-direction:column; gap:8px; }
+        .cw-topic-chips { display:flex; flex-wrap:wrap; gap:8px; }
+        .cw-topic-chip {
+          display:inline-flex;
+          padding:7px 10px;
+          border-radius:999px;
+          background:var(--accent-dim);
+          color:var(--accent);
+          font-size:.82rem;
+          font-weight:700;
+        }
+        .gc-overlay {
+          position:fixed;
+          inset:0;
+          z-index:1120;
+          overflow:hidden;
+          background:rgba(230,248,255,.88);
+          backdrop-filter:blur(14px);
+          display:flex;
+          align-items:stretch;
+          justify-content:flex-end;
+          animation:overlayIn .3s ease both;
+        }
+        body.dark-mode .gc-overlay { background:rgba(5,5,14,.9); }
+        .gc-panel {
+          width:min(1080px, 100vw);
+          background:#ffffff;
+          border-left:1px solid var(--border2);
+          display:flex;
+          flex-direction:column;
+          height:100dvh;
+          max-height:100vh;
+          animation:panelIn .38s var(--ease2) both;
+          overflow:hidden;
+        }
+        body.dark-mode .gc-panel { background:#0c0c1e; }
+        .gc-header {
+          flex:0 0 auto;
+          display:flex;
+          align-items:flex-start;
+          justify-content:space-between;
+          gap:16px;
+          padding:24px 28px 20px;
+          border-bottom:1px solid var(--border);
+        }
+        .gc-title {
+          font-family:var(--ff-chapter);
+          font-size:1.45rem;
+          color:var(--text);
+          line-height:1.2;
+        }
+        .gc-subtitle {
+          margin-top:8px;
+          color:var(--text3);
+          line-height:1.55;
+          font-size:.9rem;
+          max-width:620px;
+        }
+        .gc-body {
+          flex:1 1 0;
+          min-height:0;
+          overflow-y:auto;
+          padding:20px 24px 24px;
         }
         .home-classroom-header {
           display:flex;
@@ -3196,7 +3974,7 @@ export default function Home() {
         .topic-row.t-active { background:var(--accent-dim); padding-left:44px; }
         .topic-row.t-done { opacity:.55; }
         .topic-row.t-done:hover { opacity:.8; }
-        .t-dot { font-size:10px; color:var(--text3); flex-shrink:0; width:14px; text-align:center; }
+        .t-dot { font-family:var(--ff-mono); font-size:10px; color:var(--text3); flex-shrink:0; width:34px; text-align:left; }
         .topic-row.t-active .t-dot { color:var(--accent); }
         .topic-row.t-done .t-dot { color:var(--green); }
         .t-name { flex:1; font-size:.975rem; color:var(--text); line-height:1.4; font-weight:500; }
@@ -3252,6 +4030,15 @@ export default function Home() {
 
         /* Lesson text — light mode (handwritten, dark ink) */
         .lesson-text { display:flex; flex-direction:column; gap:5px; }
+        .lt-section-num {
+          display:inline-flex;
+          margin-right:10px;
+          font-family:var(--ff-mono);
+          font-size:.72rem;
+          letter-spacing:.08em;
+          color:var(--accent);
+          vertical-align:middle;
+        }
         .lt-h1 { font-family:var(--ff-hand); font-size:1.35rem; font-weight:700; color:#0a1520; margin:12px 0 5px; border-bottom:2px solid rgba(8,145,178,.2); padding-bottom:3px; }
         .lt-h2 { font-family:var(--ff-hand); font-size:1.15rem; font-weight:700; color:#0a1520; margin:10px 0 4px; }
         .lt-h3 { font-family:var(--ff-hand); font-size:1rem; font-weight:700; color:#0b5e7a; margin:8px 0 3px; }
@@ -3394,6 +4181,31 @@ export default function Home() {
           color:var(--accent); font-family:var(--ff-head); font-weight:700; font-size:.88rem;
         }
         .rec-summary { color:var(--text2); line-height:1.7; margin-bottom:16px; }
+        .tracking-hint-bar {
+          display:flex;
+          align-items:flex-start;
+          gap:12px;
+          margin:-8px 0 24px;
+          padding:10px 14px;
+          border-radius:12px;
+          border:1px solid var(--border);
+          background:rgba(255,255,255,.66);
+        }
+        body.dark-mode .tracking-hint-bar { background:rgba(255,255,255,.04); }
+        .tracking-hint-label {
+          flex-shrink:0;
+          font-family:var(--ff-mono);
+          font-size:8px;
+          letter-spacing:.18em;
+          text-transform:uppercase;
+          color:var(--accent);
+          padding-top:4px;
+        }
+        .tracking-hint-text {
+          color:var(--text2);
+          line-height:1.55;
+          font-size:.82rem;
+        }
         .rec-actions-row { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
         .rec-primary-btn, .rec-secondary-btn, .rec-mini-btn {
           border:none; border-radius:10px; cursor:pointer; font-weight:700;
@@ -3407,22 +4219,23 @@ export default function Home() {
         .rec-mini-btn {
           background:transparent; color:var(--accent); padding:6px 10px; border:1px solid var(--accent-mid); font-size:.78rem;
         }
-        .rec-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:14px; }
+        .rec-grid { column-count:2; column-gap:14px; }
         .rec-card {
           border:1px solid var(--border); border-radius:16px; padding:16px;
           background:rgba(255,255,255,.65);
           height: fit-content;
+          display:inline-block;
+          width:100%;
+          margin:0 0 14px;
+          break-inside:avoid;
+          vertical-align:top;
         }
-        .rec-card-wide { grid-column:1 / -1; }
+        .rec-card-wide { grid-column:auto; }
         .rec-card-label + .rec-empty,
         .rec-card-label + .rec-line,
         .rec-card-label + .rec-chip-row,
         .rec-card-label + .rec-revision-row {
           margin-top: 0;
-        }
-        .rec-card:nth-child(1),
-        .rec-card.rec-card-wide {
-          align-self: start;
         }
         body.dark-mode .rec-card { background:rgba(255,255,255,.03); }
         .rec-card-label { font-family:var(--ff-mono); font-size:9px; letter-spacing:.18em; text-transform:uppercase; color:var(--text3); margin-bottom:10px; }
@@ -3805,6 +4618,34 @@ export default function Home() {
         .tutor-style-chip { font-family:var(--ff-mono); font-size:9px; letter-spacing:.08em; padding:5px 11px; border-radius:999px; cursor:pointer; border:1px solid var(--border2); background:transparent; color:var(--text2); transition:background .15s,color .15s,border-color .15s; white-space:nowrap; }
         .tutor-style-chip:hover { background:var(--surface2); color:var(--text); }
         .tutor-style-chip.tsc-active { background:var(--accent-dim); border-color:var(--accent-mid); color:var(--accent); font-weight:600; }
+        .tutor-selection-card {
+          flex:0 0 auto;
+          margin:10px 20px 0;
+          padding:12px 14px;
+          border-radius:12px;
+          border:1px solid var(--border);
+          background:var(--surface);
+        }
+        .tutor-selection-label {
+          font-family:var(--ff-mono);
+          font-size:8px;
+          letter-spacing:.18em;
+          text-transform:uppercase;
+          color:var(--accent);
+          margin-bottom:7px;
+        }
+        .tutor-selection-quote {
+          color:var(--text);
+          line-height:1.6;
+          font-size:.9rem;
+          font-weight:600;
+        }
+        .tutor-selection-meta {
+          margin-top:8px;
+          color:var(--text2);
+          line-height:1.55;
+          font-size:.78rem;
+        }
         .tutor-body { flex:1 1 0; min-height:0; overflow-y:auto; overflow-x:hidden; padding:18px 20px; display:flex; flex-direction:column; gap:14px; overscroll-behavior:contain; scroll-behavior:smooth; -webkit-overflow-scrolling:touch; }
         .tutor-body::-webkit-scrollbar { width:4px; }
         .tutor-body::-webkit-scrollbar-thumb { background:var(--border2); border-radius:999px; }
@@ -3831,6 +4672,120 @@ export default function Home() {
         .tutor-send-btn { width:36px; height:36px; border-radius:8px; border:none; background:var(--accent); color:#fff; font-size:1.1rem; font-weight:700; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; transition:background .15s,transform .15s,box-shadow .15s; }
         .tutor-send-btn:hover:not(:disabled) { background:var(--accent-mid); transform:scale(1.08); box-shadow:0 4px 14px var(--accent-glow); }
         .tutor-send-btn:disabled { opacity:.4; cursor:not-allowed; }
+        .selection-tutor-bubble {
+          position:absolute;
+          z-index:1200;
+          display:flex;
+          flex-direction:column;
+          align-items:stretch;
+          gap:8px;
+          padding:6px;
+          border-radius:18px;
+          border:1px solid var(--accent-mid);
+          background:rgba(255,255,255,.97);
+          box-shadow:0 14px 34px rgba(8,145,178,.2);
+          animation:popIn .18s var(--ease2) both;
+          max-width:min(420px, calc(100vw - 24px));
+        }
+        body.dark-mode .selection-tutor-bubble { background:rgba(10,16,28,.97); }
+        .selection-tutor-actions {
+          display:flex;
+          align-items:center;
+          gap:6px;
+        }
+        .selection-tutor-main,
+        .selection-tutor-plus,
+        .selection-tutor-dismiss {
+          border:none;
+          cursor:pointer;
+        }
+        .selection-tutor-main {
+          padding:9px 14px;
+          border-radius:999px;
+          background:var(--accent);
+          color:#fff;
+          font-family:var(--ff-head);
+          font-size:.82rem;
+          font-weight:700;
+        }
+        .selection-tutor-plus,
+        .selection-tutor-dismiss {
+          width:30px;
+          height:30px;
+          border-radius:50%;
+          background:var(--surface);
+          color:var(--text2);
+          font-size:1rem;
+        }
+        .selection-tutor-plus:hover,
+        .selection-tutor-dismiss:hover { background:var(--surface2); color:var(--text); }
+        .selection-inline-composer {
+          display:flex;
+          flex-direction:column;
+          gap:10px;
+          padding:10px;
+          border-radius:14px;
+          border:1px solid var(--border);
+          background:var(--surface);
+        }
+        .selection-question-label {
+          font-family:var(--ff-mono);
+          font-size:9px;
+          letter-spacing:.18em;
+          text-transform:uppercase;
+          color:var(--accent);
+          margin-bottom:10px;
+        }
+        .selection-question-quote {
+          color:var(--text);
+          line-height:1.6;
+          font-size:.92rem;
+          margin-bottom:14px;
+        }
+        .selection-question-input {
+          width:100%;
+          min-height:42px;
+          max-height:220px;
+          border-radius:14px;
+          border:1px solid var(--border2);
+          background:var(--bg);
+          color:var(--text);
+          padding:12px 14px;
+          font-family:var(--ff-body);
+          font-size:.92rem;
+          outline:none;
+          resize:none;
+          overflow-y:auto;
+        }
+        .selection-question-input:focus { border-color:var(--accent-mid); box-shadow:0 0 0 2px var(--accent-dim); }
+        .selection-question-actions {
+          display:flex;
+          justify-content:flex-end;
+          gap:10px;
+          margin-top:14px;
+        }
+        .selection-question-cancel,
+        .selection-question-submit {
+          min-height:38px;
+          padding:0 14px;
+          border-radius:10px;
+          font-family:var(--ff-mono);
+          font-size:10px;
+          letter-spacing:.1em;
+          text-transform:uppercase;
+          cursor:pointer;
+        }
+        .selection-question-cancel {
+          border:1px solid var(--border2);
+          background:transparent;
+          color:var(--text2);
+        }
+        .selection-question-submit {
+          border:none;
+          background:var(--accent);
+          color:#fff;
+        }
+        .selection-question-submit:disabled { opacity:.45; cursor:not-allowed; }
 
         ::-webkit-scrollbar { width:5px; }
         ::-webkit-scrollbar-track { background:transparent; }
@@ -3933,7 +4888,8 @@ export default function Home() {
           .hero-form-card{padding:16px;border-radius:20px}
           .home-lower-wrap{padding:0 14px 28px}
           .home-classroom-card{padding:16px;margin-top:-6px}
-          .home-classroom-grid{grid-template-columns:1fr}
+          .classroom-workspace{grid-template-columns:1fr}
+          .cw-grid,.home-classroom-grid{grid-template-columns:1fr}
           .home-classroom-header{flex-direction:column;align-items:stretch}
           .hero-controls-row,.hero-controls-row-bottom{grid-template-columns:1fr}
           .hero-topic-input,.hero-control,.classroom-toggle,.classroom-connect-btn,.hero-generate-btn{width:100%}
@@ -3949,20 +4905,24 @@ export default function Home() {
           .ch-header{padding:14px 14px}.ch-title{font-size:1rem}
           .topic-row{padding:11px 14px 11px 28px}
           .topic-row:hover,.topic-row.t-active{padding-left:34px}
+          .t-dot{width:30px;font-size:9px}
           .inline-lesson{display:flex;flex-direction:column}
           .il-main{padding:18px 14px 16px}.il-sidebar{width:100%;padding:0 14px 16px}
           .il-actions{flex-direction:column;gap:8px}.il-btn{width:100%;text-align:center;padding:11px}
-          .cba-buttons,.rec-grid{grid-template-columns:1fr;gap:8px}.cba-btn{padding:14px 16px}
-          .mode-panel,.mode-panel-wide,.qm-panel,.prof-panel,.ca-panel,.fct-panel,.tutor-panel{width:100vw;border-left:none;border-top:1px solid var(--border2)}
+          .cba-buttons{grid-template-columns:1fr;gap:8px}.cba-btn{padding:14px 16px}
+          .rec-grid{column-count:1}
+          .mode-panel,.mode-panel-wide,.qm-panel,.prof-panel,.ca-panel,.fct-panel,.tutor-panel,.gc-panel{width:100vw;border-left:none;border-top:1px solid var(--border2)}
           .mode-panel,.mode-panel-wide{height:100dvh;max-height:100vh;border-radius:0;box-shadow:none}
           .mode-overlay,.prof-overlay,.qm-overlay,.ca-overlay,.fct-overlay,.tutor-overlay{align-items:flex-end;justify-content:stretch}
           .mode-overlay{padding:0;align-items:flex-end;overflow:hidden}
           @keyframes panelIn{from{transform:translateY(40px);opacity:0}to{transform:none;opacity:1}}
-          .mode-header,.qm-header,.fct-header,.ca-header,.prof-header,.tutor-header{padding:18px 18px 14px}
-          .mode-body,.qm-body,.fct-body,.ca-body,.prof-body{padding:16px 16px 20px}
+          .mode-header,.qm-header,.fct-header,.ca-header,.prof-header,.tutor-header,.gc-header{padding:18px 18px 14px}
+          .mode-body,.qm-body,.fct-body,.ca-body,.prof-body,.gc-body{padding:16px 16px 20px}
           .fct-footer,.qm-footer{padding:12px 16px}
           .tutor-fab{bottom:14px;right:14px;padding:10px 16px 10px 12px}.tutor-fab-label{font-size:.82rem}
           .tutor-input-bar{padding:10px 12px 14px}
+          .tracking-hint-bar{flex-direction:column;gap:6px}
+          .selection-tutor-bubble{max-width:calc(100vw - 24px)}
           .ca-topic-bar-name{flex:0 0 90px;font-size:.75rem}.ca-score-big{font-size:2.4rem}
           .gate-modal{padding:28px 20px;margin:0 12px}
           .gate-actions{flex-direction:column;width:100%}
@@ -4001,7 +4961,7 @@ export default function Home() {
           currentUser={currentUser}
           courses={profileCourses}
           onCoursesRefresh={refreshProfileCourses}
-          onSignOut={async () => { await clearSession(); setCurrentUser(null); setProfileCourses([]); setProfileOpen(false); setRecommendations(null); setClassroomData(null); setUseClassroomData(false); setClassroomInfoOpen(false); }}
+          onSignOut={async () => { await clearSession(); setCurrentUser(null); setProfileCourses([]); setProfileOpen(false); setRecommendations(null); setClassroomData(null); setClassroomCourses([]); setClassroomSelectedCourseId(""); setClassroomCoursework([]); setClassroomAnnouncements([]); setClassroomInsights(null); setUseClassroomData(false); setClassroomInfoOpen(false); }}
         />
       )}
 
@@ -4024,12 +4984,31 @@ export default function Home() {
         />
       )}
 
+      <ClassroomSidePanel
+        open={classroomPanelOpen}
+        onClose={() => setClassroomPanelOpen(false)}
+        classroomData={classroomData}
+        classroomCourses={classroomCourses}
+        selectedCourseId={classroomSelectedCourseId}
+        coursework={classroomCoursework}
+        announcements={classroomAnnouncements}
+        insights={classroomInsights}
+        loadingCourses={classroomWorkspaceLoading}
+        loadingDetails={classroomDetailsLoading}
+        analyzing={classroomAnalyzeLoading}
+        error={classroomError}
+        onSelectCourse={loadCourseDetails}
+        onAnalyze={handleAnalyzeClassroom}
+        onConnectClassroom={handleConnectClassroom}
+      />
+
       {(showHome || (loading && !course)) && (
         <>
           <HeroInput
             topic={topic} setTopic={setTopic} level={level} setLevel={setLevel} goal={goal} setGoal={setGoal}
             useClassroomData={useClassroomData} setUseClassroomData={setUseClassroomData}
             classroomConnected={!!classroomData?.connected} onConnectClassroom={handleConnectClassroom} classroomLoading={classroomLoading}
+            onOpenClassroomPanel={handleOpenClassroomPanel}
             onGenerate={generateCourse} loading={loading}
             onProfileOpen={() => currentUser ? setProfileOpen(true) : setShowAuth(true)}
             profileCount={profileCourses.length}
@@ -4041,7 +5020,16 @@ export default function Home() {
             onShowNotifications={() => setClassroomToastTick((prev) => prev + 1)}
             disclaimerOpen={classroomInfoOpen}
             onToggleDisclaimer={() => setClassroomInfoOpen((prev) => !prev)}
+            classroomIsMock={!!classroomData?.is_mock}
           />
+          <div className="home-lower-wrap">
+            <ClassroomSnapshotCard
+              classroomData={classroomData}
+              onConnectClassroom={handleConnectClassroom}
+              classroomLoading={classroomLoading}
+              onOpenWorkspace={() => { loadWorkspaceCourses(classroomSelectedCourseId); setClassroomPanelOpen(true); }}
+            />
+          </div>
           <ClassroomLiveToasts alerts={classroomData?.alerts || []} visible={!!currentUser && !!classroomData?.connected} resetKey={classroomToastTick} />
         </>
       )}
@@ -4052,6 +5040,7 @@ export default function Home() {
             topic={topic} setTopic={setTopic} level={level} setLevel={setLevel} goal={goal} setGoal={setGoal}
             useClassroomData={useClassroomData} setUseClassroomData={setUseClassroomData}
             classroomConnected={!!classroomData?.connected} onConnectClassroom={handleConnectClassroom} classroomLoading={classroomLoading}
+            onOpenClassroomPanel={handleOpenClassroomPanel}
             onGenerate={generateCourse} loading={loading}
             onProfileOpen={() => currentUser ? setProfileOpen(true) : setShowAuth(true)}
             profileCount={profileCourses.length}
@@ -4062,6 +5051,7 @@ export default function Home() {
             onShowNotifications={() => setClassroomToastTick((prev) => prev + 1)}
             disclaimerOpen={classroomInfoOpen}
             onToggleDisclaimer={() => setClassroomInfoOpen((prev) => !prev)}
+            classroomIsMock={!!classroomData?.is_mock}
           />
           <div className="course-page">
             <div className="course-header">
@@ -4109,6 +5099,7 @@ export default function Home() {
               </div>
             )}
             <ProgressStrip completed={completedLessons.length} total={totalTopics} topic={activeTopic} level={activeLevel} />
+            <TrackingHintBar hint={recommendations?.tracking_hint || "Keep taking topic quizzes so the AI can identify weak topics, prioritize revision, and adapt the learning path."} />
             <div className="chapters-wrap">
               {course.chapters.map((chapter, i) => (
                 <ChapterSection
@@ -4119,20 +5110,34 @@ export default function Home() {
                   topic={topic} level={level} onOpenQuiz={openQuiz}
                   expandedTopics={expandedTopics} onTopicExpand={handleTopicExpand} ensureLessonLoaded={ensureLessonLoaded}
                   masteryMap={masteryMap} nextRecommended={nextRecommended}
+                  onLessonSelection={handleLessonSelection}
+                  courseTitle={course.course_title}
                 />
               ))}
             </div>
             <CourseBottomActions courseTopic={activeTopic} level={activeLevel} allTopics={getAllTopics(course)} goal={goal} useClassroomData={useClassroomData} />
           </div>
 
-          {!tutorOpen && <AiTutorFab onClick={() => setTutorOpen(true)} />}
+          {!tutorOpen && <AiTutorFab onClick={() => { setTutorContext(null); setTutorDraft(""); setTutorAutoSend(""); setTutorOpen(true); }} />}
+          <SelectionTutorBubble
+            selection={selectionBubble}
+            composerOpen={selectionQuestionOpen}
+            composerValue={selectionQuestion}
+            onComposerChange={setSelectionQuestion}
+            onAskTutor={() => openTutorWithSelection(selectionBubble, selectionQuestionOpen ? selectionQuestion : "")}
+            onAskWithQuestion={() => setSelectionQuestionOpen(true)}
+            onClose={closeSelectionUi}
+          />
           {tutorOpen && (
             <AiTutorPanel
               courseTopic={course.course_title} level={activeLevel}
-              currentTopic={null} allTopics={getAllTopics(course)}
-              onClose={() => setTutorOpen(false)}
+              currentTopic={tutorContext?.lessonTitle || null} allTopics={getAllTopics(course)}
+              onClose={() => { setTutorOpen(false); setTutorAutoSend(""); }}
               persistedMessages={tutorMessages}
               onMessagesChange={setTutorMessages}
+              selectedContext={tutorContext}
+              initialDraft={tutorDraft}
+              autoSendText={tutorAutoSend}
             />
           )}
         </>

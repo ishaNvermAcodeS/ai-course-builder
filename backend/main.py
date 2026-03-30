@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
-from fastapi import Cookie, FastAPI, HTTPException, Response
+from fastapi import Cookie, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from dotenv import load_dotenv
@@ -53,6 +54,20 @@ app.add_middleware(
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").strip() or "http://localhost:3000"
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:8000/auth/callback").strip()
+GOOGLE_OAUTH_SCOPES = [
+    "https://www.googleapis.com/auth/classroom.courses.readonly",
+    "https://www.googleapis.com/auth/classroom.coursework.me.readonly",
+    "https://www.googleapis.com/auth/classroom.announcements.readonly",
+]
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_CLASSROOM_API = "https://classroom.googleapis.com/v1"
+CLASSROOM_URGENT_DAYS = 2
+oauth_state_store = {}
 VIDEO_HOST_BLOCKLIST = {
     "youtube.com",
     "www.youtube.com",
@@ -220,6 +235,10 @@ def init_db():
                 provider TEXT NOT NULL,
                 is_connected BOOLEAN NOT NULL DEFAULT TRUE,
                 is_mock BOOLEAN NOT NULL DEFAULT FALSE,
+                access_token TEXT NOT NULL DEFAULT '',
+                refresh_token TEXT NOT NULL DEFAULT '',
+                token_expires_at TEXT,
+                scope TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL
             )
             """,
@@ -336,6 +355,10 @@ def init_db():
                 provider TEXT NOT NULL,
                 is_connected INTEGER NOT NULL DEFAULT 1,
                 is_mock INTEGER NOT NULL DEFAULT 0,
+                access_token TEXT NOT NULL DEFAULT '',
+                refresh_token TEXT NOT NULL DEFAULT '',
+                token_expires_at TEXT,
+                scope TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
             );
@@ -366,7 +389,33 @@ def init_db():
             """
         )
     conn.commit()
+    ensure_classroom_connection_columns(conn)
     conn.close()
+
+
+def ensure_classroom_connection_columns(conn):
+    existing = set()
+    if uses_postgres():
+        info = db_fetchall(
+            conn,
+            """SELECT column_name
+               FROM information_schema.columns
+               WHERE table_name = 'classroom_connections'""",
+        )
+        existing = {row["column_name"] for row in info}
+    else:
+        info = db_fetchall(conn, "PRAGMA table_info(classroom_connections)")
+        existing = {row["name"] for row in info}
+    additions = [
+        ("access_token", "TEXT NOT NULL DEFAULT ''"),
+        ("refresh_token", "TEXT NOT NULL DEFAULT ''"),
+        ("token_expires_at", "TEXT"),
+        ("scope", "TEXT NOT NULL DEFAULT ''"),
+    ]
+    for column_name, definition in additions:
+        if column_name in existing:
+            continue
+        db_execute(conn, f"ALTER TABLE classroom_connections ADD COLUMN {column_name} {definition}")
 
 
 init_db()
@@ -401,6 +450,47 @@ def parse_dt(value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def require_google_oauth_config():
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Google Classroom OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.")
+
+
+def clean_oauth_states():
+    now = utc_now()
+    expired = [key for key, value in oauth_state_store.items() if value["expires_at"] <= now]
+    for key in expired:
+        oauth_state_store.pop(key, None)
+
+
+def create_google_oauth_state(user_id: int) -> str:
+    clean_oauth_states()
+    state = secrets.token_urlsafe(24)
+    oauth_state_store[state] = {"user_id": int(user_id), "expires_at": utc_now() + timedelta(minutes=15)}
+    return state
+
+
+def consume_google_oauth_state(state: str) -> int:
+    clean_oauth_states()
+    item = oauth_state_store.pop(state, None)
+    if not item:
+        raise HTTPException(status_code=400, detail="Google sign-in state is invalid or expired.")
+    return int(item["user_id"])
+
+
+def build_google_due_at(due_date: Optional[dict], due_time: Optional[dict]) -> Optional[str]:
+    if not due_date:
+        return None
+    year = due_date.get("year")
+    month = due_date.get("month")
+    day = due_date.get("day")
+    if not year or not month or not day:
+        return None
+    hour = (due_time or {}).get("hours", 23)
+    minute = (due_time or {}).get("minutes", 59)
+    dt = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+    return dt.isoformat()
 
 
 def strip_fences(text: str) -> str:
@@ -890,21 +980,58 @@ def build_mock_classroom_payload(course_topic: str = "General Studies"):
     return {"courses": courses, "assignments": assignments}
 
 
-def store_classroom_payload(user_id: int, payload: dict, is_mock: bool):
+def save_classroom_connection_tokens(user_id: int, *, access_token: str, refresh_token: str = "", token_expires_at: Optional[str] = None, scope: str = "", is_mock: bool = False):
     now = utc_now().isoformat()
-    courses = payload.get("courses", [])
-    assignments = payload.get("assignments", [])
     conn = get_db()
     db_execute(
         conn,
-        """INSERT INTO classroom_connections (user_id, provider, is_connected, is_mock, updated_at)
-           VALUES (?, ?, ?, ?, ?)
+        """INSERT INTO classroom_connections (user_id, provider, is_connected, is_mock, access_token, refresh_token, token_expires_at, scope, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(user_id) DO UPDATE SET
                provider=excluded.provider,
                is_connected=excluded.is_connected,
                is_mock=excluded.is_mock,
+               access_token=excluded.access_token,
+               refresh_token=CASE WHEN excluded.refresh_token <> '' THEN excluded.refresh_token ELSE classroom_connections.refresh_token END,
+               token_expires_at=excluded.token_expires_at,
+               scope=excluded.scope,
                updated_at=excluded.updated_at""",
-        (user_id, "google_classroom", True, is_mock, now),
+        (user_id, "google_classroom", True, is_mock, access_token, refresh_token, token_expires_at, scope, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def store_classroom_payload(user_id: int, payload: dict, is_mock: bool):
+    now = utc_now().isoformat()
+    courses = payload.get("courses", [])
+    assignments = payload.get("assignments", [])
+    connection = payload.get("connection", {})
+    conn = get_db()
+    db_execute(
+        conn,
+        """INSERT INTO classroom_connections (user_id, provider, is_connected, is_mock, access_token, refresh_token, token_expires_at, scope, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(user_id) DO UPDATE SET
+               provider=excluded.provider,
+               is_connected=excluded.is_connected,
+               is_mock=excluded.is_mock,
+               access_token=CASE WHEN excluded.access_token <> '' THEN excluded.access_token ELSE classroom_connections.access_token END,
+               refresh_token=CASE WHEN excluded.refresh_token <> '' THEN excluded.refresh_token ELSE classroom_connections.refresh_token END,
+               token_expires_at=COALESCE(excluded.token_expires_at, classroom_connections.token_expires_at),
+               scope=CASE WHEN excluded.scope <> '' THEN excluded.scope ELSE classroom_connections.scope END,
+               updated_at=excluded.updated_at""",
+        (
+            user_id,
+            "google_classroom",
+            True,
+            is_mock,
+            connection.get("access_token", ""),
+            connection.get("refresh_token", ""),
+            connection.get("token_expires_at"),
+            connection.get("scope", ""),
+            now,
+        ),
     )
     db_execute(conn, "DELETE FROM classroom_courses WHERE user_id = ?", (user_id,))
     db_execute(conn, "DELETE FROM classroom_assignments WHERE user_id = ?", (user_id,))
@@ -946,11 +1073,200 @@ def store_classroom_payload(user_id: int, payload: dict, is_mock: bool):
     conn.close()
 
 
+def get_classroom_connection_row(user_id: int):
+    conn = get_db()
+    row = db_fetchone(
+        conn,
+        """SELECT user_id, provider, is_connected, is_mock, access_token, refresh_token, token_expires_at, scope, updated_at
+           FROM classroom_connections
+           WHERE user_id = ?""",
+        (user_id,),
+    )
+    conn.close()
+    return row
+
+
+def exchange_google_code_for_tokens(code: str) -> dict:
+    require_google_oauth_config()
+    try:
+        response = requests.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Google token exchange failed: {exc}") from exc
+    if not response.ok:
+        raise HTTPException(status_code=502, detail=f"Google token exchange failed: {response.text}")
+    return response.json()
+
+
+def refresh_google_access_token(user_id: int, refresh_token: str) -> str:
+    require_google_oauth_config()
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Google Classroom connection expired. Please reconnect your account.")
+    try:
+        response = requests.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Google token refresh failed: {exc}") from exc
+    if not response.ok:
+        raise HTTPException(status_code=502, detail=f"Google token refresh failed: {response.text}")
+    token_data = response.json()
+    expires_at = utc_now() + timedelta(seconds=int(token_data.get("expires_in", 3600)))
+    save_classroom_connection_tokens(
+        user_id,
+        access_token=token_data.get("access_token", ""),
+        refresh_token=token_data.get("refresh_token", ""),
+        token_expires_at=expires_at.isoformat(),
+        scope=token_data.get("scope", ""),
+        is_mock=False,
+    )
+    return token_data.get("access_token", "")
+
+
+def get_google_access_token(user_id: int) -> str:
+    connection = get_classroom_connection_row(user_id)
+    if not connection or not connection["is_connected"]:
+        raise HTTPException(status_code=404, detail="Google Classroom is not connected for this account.")
+    access_token = connection["access_token"] or ""
+    token_expires_at = parse_dt(connection["token_expires_at"])
+    if access_token and token_expires_at and token_expires_at > utc_now() + timedelta(minutes=1):
+        return access_token
+    if access_token and not token_expires_at:
+        return access_token
+    return refresh_google_access_token(user_id, connection["refresh_token"] or "")
+
+
+def google_classroom_get(user_id: int, path: str, params: Optional[dict] = None):
+    access_token = get_google_access_token(user_id)
+    url = f"{GOOGLE_CLASSROOM_API}{path}"
+    try:
+        response = requests.get(
+            url,
+            params=params or {},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Google Classroom request failed: {exc}") from exc
+    if response.status_code == 401:
+        access_token = refresh_google_access_token(user_id, get_classroom_connection_row(user_id)["refresh_token"] or "")
+        try:
+            response = requests.get(
+                url,
+                params=params or {},
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=20,
+            )
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"Google Classroom request failed: {exc}") from exc
+    if not response.ok:
+        raise HTTPException(status_code=response.status_code, detail=f"Google Classroom API error: {response.text}")
+    return response.json()
+
+
+def fetch_google_classroom_courses(user_id: int) -> list:
+    payload = google_classroom_get(user_id, "/courses", {"courseStates": "ACTIVE"})
+    courses = []
+    for course in payload.get("courses", []):
+        courses.append({
+            "id": safe_topic(course.get("id")),
+            "name": safe_topic(course.get("name") or "Untitled Course"),
+            "section": safe_topic(course.get("section")),
+            "description": safe_topic(course.get("descriptionHeading") or course.get("description")),
+        })
+    return courses
+
+
+def fetch_google_classroom_coursework(user_id: int, course_id: str) -> list:
+    payload = google_classroom_get(user_id, f"/courses/{course_id}/courseWork")
+    items = []
+    for work in payload.get("courseWork", []):
+        items.append({
+            "id": safe_topic(work.get("id")),
+            "course_id": safe_topic(course_id),
+            "title": safe_topic(work.get("title") or "Untitled Coursework"),
+            "description": safe_topic(work.get("description")),
+            "due_at": build_google_due_at(work.get("dueDate"), work.get("dueTime")),
+            "alternate_link": work.get("alternateLink", ""),
+            "raw": work,
+        })
+    return items
+
+
+def fetch_google_classroom_announcements(user_id: int, course_id: str) -> list:
+    payload = google_classroom_get(user_id, f"/courses/{course_id}/announcements")
+    items = []
+    for announcement in payload.get("announcements", []):
+        items.append({
+            "id": safe_topic(announcement.get("id")),
+            "course_id": safe_topic(course_id),
+            "text": safe_topic(announcement.get("text")),
+            "update_time": announcement.get("updateTime") or announcement.get("creationTime"),
+            "alternate_link": announcement.get("alternateLink", ""),
+        })
+    return items
+
+
+def sync_google_classroom_snapshot(user_id: int):
+    courses = fetch_google_classroom_courses(user_id)
+    assignments = []
+    for course in courses:
+        coursework = fetch_google_classroom_coursework(user_id, course["id"])
+        for work in coursework:
+            assignments.append({
+                "id": work["id"],
+                "course_id": course["id"],
+                "course_name": course["name"],
+                "title": work["title"],
+                "topic_hint": work["title"],
+                "description": work["description"],
+                "due_at": work["due_at"],
+                "alternate_link": work["alternate_link"],
+                "raw": work["raw"],
+            })
+    connection = get_classroom_connection_row(user_id)
+    store_classroom_payload(
+        user_id,
+        {
+            "connection": {
+                "access_token": connection["access_token"] if connection else "",
+                "refresh_token": connection["refresh_token"] if connection else "",
+                "token_expires_at": connection["token_expires_at"] if connection else None,
+                "scope": connection["scope"] if connection else "",
+            },
+            "courses": courses,
+            "assignments": assignments,
+        },
+        is_mock=False,
+    )
+    snapshot = get_classroom_snapshot(user_id)
+    snapshot["alerts"] = build_classroom_alerts(snapshot.get("assignments", []))
+    snapshot["notifications"] = build_classroom_notifications(snapshot.get("assignments", []))
+    return snapshot
+
+
 def get_classroom_snapshot(user_id: int):
     conn = get_db()
     connection = db_fetchone(
         conn,
-        "SELECT provider, is_connected, is_mock, updated_at FROM classroom_connections WHERE user_id = ?",
+        """SELECT provider, is_connected, is_mock, access_token, refresh_token, token_expires_at, scope, updated_at
+           FROM classroom_connections WHERE user_id = ?""",
         (user_id,),
     )
     courses = db_fetchall(
@@ -1000,6 +1316,8 @@ def get_classroom_snapshot(user_id: int):
         "connected": bool(connection["is_connected"]) if connection else False,
         "is_mock": bool(connection["is_mock"]) if connection else False,
         "updated_at": connection["updated_at"] if connection else None,
+        "provider": connection["provider"] if connection else "google_classroom",
+        "scope": connection["scope"] if connection else "",
         "courses": course_items,
         "assignments": assignment_items,
     }
@@ -1022,6 +1340,30 @@ def build_classroom_alerts(assignments: list):
             }
         )
     return alerts
+
+
+def build_classroom_notifications(assignments: list):
+    now = utc_now()
+    buckets = {"urgent": [], "upcoming": [], "overdue": []}
+    for item in assignments:
+        due_at = item.get("due_at")
+        due_dt = parse_dt(due_at)
+        if not due_dt:
+            continue
+        summary = {
+            "id": item.get("id"),
+            "title": item.get("title"),
+            "course_name": item.get("course_name"),
+            "description": item.get("raw", {}).get("description") if isinstance(item.get("raw"), dict) else item.get("description", ""),
+            "due_at": due_at,
+        }
+        if due_dt < now:
+            buckets["overdue"].append(summary)
+        elif due_dt <= now + timedelta(days=CLASSROOM_URGENT_DAYS):
+            buckets["urgent"].append(summary)
+        else:
+            buckets["upcoming"].append(summary)
+    return buckets
 
 
 def topic_priority_key(topic: str, progress_map: dict, alerts: list):
@@ -1300,6 +1642,9 @@ class TutorChatRequest(BaseModel):
     level: str
     teaching_style: str
     all_topics: Optional[list] = []
+    selected_text: Optional[str] = ""
+    selected_context: Optional[str] = ""
+    selection_question: Optional[str] = ""
 
 class AuthRequest(BaseModel):
     email: str
@@ -1367,6 +1712,10 @@ class ClassroomDataRequest(BaseModel):
     course_topic: Optional[str] = "General Studies"
 
 
+class ClassroomAnalyzeRequest(BaseModel):
+    course_id: Optional[str] = ""
+
+
 class AutonomousTriggerRequest(BaseModel):
     course_topic: str
     level: str
@@ -1382,6 +1731,48 @@ def home():
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
+
+@app.get("/auth/google")
+def google_auth(kirigumi_session: Optional[str] = Cookie(default=None)):
+    require_google_oauth_config()
+    user = get_current_user(kirigumi_session)
+    state = create_google_oauth_state(user["id"])
+    auth_url = requests.Request(
+        "GET",
+        GOOGLE_AUTH_URL,
+        params={
+            "client_id": GOOGLE_CLIENT_ID,
+            "redirect_uri": GOOGLE_REDIRECT_URI,
+            "response_type": "code",
+            "scope": " ".join(GOOGLE_OAUTH_SCOPES),
+            "access_type": "offline",
+            "include_granted_scopes": "true",
+            "prompt": "consent",
+            "state": state,
+        },
+    ).prepare().url
+    return RedirectResponse(auth_url)
+
+
+@app.get("/auth/callback")
+def google_auth_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    if error:
+        return RedirectResponse(f"{FRONTEND_URL}?classroom=error&reason={error}")
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing Google OAuth code or state.")
+    user_id = consume_google_oauth_state(state)
+    token_data = exchange_google_code_for_tokens(code)
+    expires_at = utc_now() + timedelta(seconds=int(token_data.get("expires_in", 3600)))
+    save_classroom_connection_tokens(
+        user_id,
+        access_token=token_data.get("access_token", ""),
+        refresh_token=token_data.get("refresh_token", ""),
+        token_expires_at=expires_at.isoformat(),
+        scope=token_data.get("scope", ""),
+        is_mock=False,
+    )
+    sync_google_classroom_snapshot(user_id)
+    return RedirectResponse(f"{FRONTEND_URL}?classroom=connected")
 
 @app.post("/auth/signup")
 def signup(request: SignupRequest, response: Response):
@@ -1599,11 +1990,15 @@ def run_autonomous_triggers(request: AutonomousTriggerRequest, kirigumi_session:
 
 
 @app.get("/classroom-data")
-def get_classroom_data(kirigumi_session: Optional[str] = Cookie(default=None)):
+def get_classroom_data(refresh: bool = Query(default=False), kirigumi_session: Optional[str] = Cookie(default=None)):
     user = get_current_user(kirigumi_session)
     touch_learner_activity(user["id"])
-    snapshot = get_classroom_snapshot(user["id"])
+    if refresh and get_classroom_connection_row(user["id"]) and not get_classroom_snapshot(user["id"]).get("is_mock"):
+        snapshot = sync_google_classroom_snapshot(user["id"])
+    else:
+        snapshot = get_classroom_snapshot(user["id"])
     snapshot["alerts"] = build_classroom_alerts(snapshot.get("assignments", []))
+    snapshot["notifications"] = build_classroom_notifications(snapshot.get("assignments", []))
     return snapshot
 
 
@@ -1615,7 +2010,69 @@ def sync_classroom_data(request: ClassroomDataRequest, kirigumi_session: Optiona
     store_classroom_payload(user["id"], payload, is_mock=bool(request.use_mock))
     snapshot = get_classroom_snapshot(user["id"])
     snapshot["alerts"] = build_classroom_alerts(snapshot.get("assignments", []))
+    snapshot["notifications"] = build_classroom_notifications(snapshot.get("assignments", []))
     return snapshot
+
+
+@app.get("/classroom/courses")
+def classroom_courses(kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
+    snapshot = sync_google_classroom_snapshot(user["id"])
+    return {"courses": snapshot.get("courses", []), "notifications": snapshot.get("notifications", {})}
+
+
+@app.get("/classroom/coursework/{course_id}")
+def classroom_coursework(course_id: str, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
+    coursework = fetch_google_classroom_coursework(user["id"], course_id)
+    return {"course_id": course_id, "coursework": coursework, "notifications": build_classroom_notifications(coursework)}
+
+
+@app.get("/classroom/announcements/{course_id}")
+def classroom_announcements(course_id: str, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
+    return {"course_id": course_id, "announcements": fetch_google_classroom_announcements(user["id"], course_id)}
+
+
+@app.post("/classroom/analyze")
+def classroom_analyze(request: ClassroomAnalyzeRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
+    snapshot = sync_google_classroom_snapshot(user["id"])
+    courses = snapshot.get("courses", [])
+    assignments = snapshot.get("assignments", [])
+    if request.course_id:
+        course_id = safe_topic(request.course_id)
+        courses = [course for course in courses if course.get("id") == course_id]
+        assignments = [item for item in assignments if item.get("course_id") == course_id]
+    notifications = build_classroom_notifications(assignments)
+    prompt = f"""
+You are an academic planning assistant.
+Use the classroom data below to produce a JSON object with:
+- study_plan: array of 4 to 6 concise steps
+- reminders: array of short reminders
+- key_topics: array of likely key topics to study
+- summary: one short paragraph
+
+Courses:
+{json.dumps(courses, indent=2)}
+
+Assignments:
+{json.dumps(assignments, indent=2)}
+
+Notifications:
+{json.dumps(notifications, indent=2)}
+"""
+    insights = parse_json_object(call_llm(prompt, max_tokens=900))
+    return {
+        "courses": courses,
+        "assignments": assignments,
+        "notifications": notifications,
+        "insights": insights,
+    }
 
 
 # ── Course generation ─────────────────────────────────────────────────────────
@@ -2000,10 +2457,17 @@ def tutor_chat(request: TutorChatRequest):
     course_type = classify_course_type(request.course_topic, request.all_topics)
     quant = " For numerical questions, always show full working steps." if course_type == "quantitative" else ""
     ctx = f"\nStudent currently has open: {request.current_topic}." if request.current_topic else ""
+    selection_ctx = ""
+    if request.selected_text:
+        selection_ctx += f'\nSelected passage: "{request.selected_text}".'
+    if request.selected_context:
+        selection_ctx += f"\nNearby lesson context: {request.selected_context}"
+    if request.selection_question:
+        selection_ctx += f"\nSpecific doubt from the student: {request.selection_question}"
     topics_preview = ", ".join(request.all_topics[:15]) if request.all_topics else "various topics"
     system_prompt = f"""You are an expert AI tutor for "{request.course_topic}" at {request.level} level.
 Teaching style: {request.teaching_style}
-Topics in course: {topics_preview}{ctx}{quant}
+Topics in course: {topics_preview}{ctx}{selection_ctx}{quant}
 
 Rules:
 - Adapt to the teaching style at all times
@@ -2011,6 +2475,7 @@ Rules:
 - Use concrete examples relevant to {request.course_topic}
 - For quizzes: ask 2-3 questions and wait for answers before revealing them
 - Use **bold** for key terms; use bullet points when helpful
+- If selected text/context is provided, explain that exact passage first before broadening out
 - Never refuse to explain a topic"""
     msgs = [{"role": "system", "content": system_prompt}]
     for m in request.messages[-20:]:
