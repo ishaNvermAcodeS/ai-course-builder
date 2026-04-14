@@ -1896,6 +1896,15 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
     ...(notifications.overdue || []).map((item) => ({ ...item, tone: "overdue", kind: "Deadline" })),
     ...(notifications.urgent || []).map((item) => ({ ...item, tone: "urgent", kind: "Upcoming" })),
     ...(notifications.upcoming || []).map((item) => ({ ...item, tone: "upcoming", kind: "Planned" })),
+    ...announcements.slice(0, 4).map((item) => ({
+      id: item.id,
+      title: item.text || "Announcement",
+      description: item.text || "",
+      due_at: item.update_time || "",
+      course_name: selectedCourse?.name || "Selected course",
+      tone: "upcoming",
+      kind: "Announcement",
+    })),
   ];
 
   return (
@@ -2300,6 +2309,7 @@ export default function Home() {
   const typedTopics = useRef(new Set());
   const classroomSelectedCourseRef = useRef("");
   const classroomDetailsRequestRef = useRef(0);
+  const classroomCourseDetailsCacheRef = useRef({});
   const [viewState, setViewState] = useState("home");
 
   const getTotalTopics = (c) => c?.chapters?.reduce((a, ch) => a + ch.topics.length, 0) ?? 0;
@@ -2449,6 +2459,10 @@ export default function Home() {
     classroomSelectedCourseRef.current = classroomSelectedCourseId;
   }, [classroomSelectedCourseId]);
 
+  useEffect(() => {
+    classroomCourseDetailsCacheRef.current = {};
+  }, [currentUser?.id]);
+
   const loadWorkspaceCourses = useCallback(async (prefillCourseId = "") => {
     if (!currentUser || !classroomData?.connected) return;
     setClassroomWorkspaceLoading(true);
@@ -2473,17 +2487,29 @@ export default function Home() {
 
   const loadCourseDetails = useCallback(async (courseId) => {
     if (!courseId || !currentUser) return;
+    const cached = classroomCourseDetailsCacheRef.current[courseId];
+    setClassroomSelectedCourseId(courseId);
+    setClassroomError("");
+    if (cached) {
+      setClassroomCoursework(cached.coursework || []);
+      setClassroomAnnouncements(cached.announcements || []);
+      setClassroomDetailsLoading(false);
+      return;
+    }
     classroomDetailsRequestRef.current += 1;
     const requestId = classroomDetailsRequestRef.current;
-    setClassroomSelectedCourseId(courseId);
     setClassroomDetailsLoading(true);
-    setClassroomError("");
     setClassroomInsights(null);
     try {
       const [workRes, annRes] = await Promise.all([loadClassroomCoursework(courseId), loadClassroomAnnouncements(courseId)]);
       if (requestId !== classroomDetailsRequestRef.current) return;
-      setClassroomCoursework(workRes.coursework || []);
-      setClassroomAnnouncements(annRes.announcements || []);
+      const nextDetails = {
+        coursework: workRes.coursework || [],
+        announcements: annRes.announcements || [],
+      };
+      classroomCourseDetailsCacheRef.current[courseId] = nextDetails;
+      setClassroomCoursework(nextDetails.coursework);
+      setClassroomAnnouncements(nextDetails.announcements);
     } catch (e) {
       if (requestId !== classroomDetailsRequestRef.current) return;
       console.error(e);
@@ -2545,6 +2571,7 @@ export default function Home() {
         const data = await loadClassroomData();
         setClassroomData(data);
         setUseClassroomData((prev) => prev && !!data?.connected);
+        classroomCourseDetailsCacheRef.current = {};
       } catch {
         setClassroomData(null);
       }
@@ -2563,6 +2590,7 @@ export default function Home() {
         try {
           const data = await refreshClassroomData();
           setClassroomData(data);
+          classroomCourseDetailsCacheRef.current = {};
           setUseClassroomData(true);
           setClassroomInfoOpen(true);
           setClassroomToastTick((prev) => prev + 1);
