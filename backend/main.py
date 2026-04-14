@@ -1023,21 +1023,43 @@ def build_mock_classroom_payload(course_topic: str = "General Studies"):
 def save_classroom_connection_tokens(user_id: int, *, access_token: str, refresh_token: str = "", token_expires_at: Optional[str] = None, scope: str = "", is_mock: bool = False):
     now = utc_now().isoformat()
     conn = get_db()
-    db_execute(
-        conn,
-        """INSERT INTO classroom_connections (user_id, provider, is_connected, is_mock, access_token, refresh_token, token_expires_at, scope, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(user_id) DO UPDATE SET
-               provider=excluded.provider,
-               is_connected=excluded.is_connected,
-               is_mock=excluded.is_mock,
-               access_token=excluded.access_token,
-               refresh_token=CASE WHEN excluded.refresh_token <> '' THEN excluded.refresh_token ELSE classroom_connections.refresh_token END,
-               token_expires_at=excluded.token_expires_at,
-               scope=excluded.scope,
-               updated_at=excluded.updated_at""",
-        (user_id, "google_classroom", True, is_mock, access_token, refresh_token, token_expires_at, scope, now),
-    )
+    try:
+        db_execute(
+            conn,
+            """INSERT INTO classroom_connections (user_id, provider, is_connected, is_mock, access_token, refresh_token, token_expires_at, scope, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                   provider=excluded.provider,
+                   is_connected=excluded.is_connected,
+                   is_mock=excluded.is_mock,
+                   access_token=excluded.access_token,
+                   refresh_token=CASE WHEN excluded.refresh_token <> '' THEN excluded.refresh_token ELSE classroom_connections.refresh_token END,
+                   token_expires_at=excluded.token_expires_at,
+                   scope=excluded.scope,
+                   updated_at=excluded.updated_at""",
+            (user_id, "google_classroom", True, is_mock, access_token, refresh_token, token_expires_at, scope, now),
+        )
+    except Exception as exc:
+        if uses_postgres() and "access_token" in str(exc):
+            ensure_classroom_connection_columns(conn)
+            db_execute(
+                conn,
+                """INSERT INTO classroom_connections (user_id, provider, is_connected, is_mock, access_token, refresh_token, token_expires_at, scope, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       provider=excluded.provider,
+                       is_connected=excluded.is_connected,
+                       is_mock=excluded.is_mock,
+                       access_token=excluded.access_token,
+                       refresh_token=CASE WHEN excluded.refresh_token <> '' THEN excluded.refresh_token ELSE classroom_connections.refresh_token END,
+                       token_expires_at=excluded.token_expires_at,
+                       scope=excluded.scope,
+                       updated_at=excluded.updated_at""",
+                (user_id, "google_classroom", True, is_mock, access_token, refresh_token, token_expires_at, scope, now),
+            )
+        else:
+            conn.close()
+            raise
     conn.commit()
     conn.close()
 
