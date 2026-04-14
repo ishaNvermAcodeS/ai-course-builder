@@ -2428,19 +2428,7 @@ export default function Home() {
     }
     setClassroomLoading(true);
     setClassroomError("");
-    try {
-      const liveSession = await loadSession();
-      if (!liveSession) {
-        setCurrentUser(null);
-        setShowAuth(true);
-        setClassroomError("Your sign-in session expired. Please sign in again, then reconnect Google Classroom.");
-        return;
-      }
-      setCurrentUser(liveSession);
-      window.location.assign(`${API_BASE}/auth/google`);
-    } finally {
-      setClassroomLoading(false);
-    }
+    window.location.assign(`${API_BASE}/auth/google`);
   }, [currentUser]);
 
   const loadWorkspaceCourses = useCallback(async (prefillCourseId = "") => {
