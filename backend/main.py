@@ -15,6 +15,7 @@ import re
 import requests
 import secrets
 import sqlite3
+from urllib.parse import urlparse
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -29,8 +30,9 @@ DB_PATH = os.path.join(BASE_DIR, "kirigumi.db")
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SESSION_COOKIE = "kirigumi_session"
 SESSION_DAYS = 30
-COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
-COOKIE_SAMESITE = (os.getenv("COOKIE_SAMESITE", "lax").strip().lower() or "lax")
+COOKIE_SECURE_ENV = os.getenv("COOKIE_SECURE", "").strip().lower()
+COOKIE_SAMESITE_ENV = (os.getenv("COOKIE_SAMESITE", "").strip().lower())
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").strip() or "http://localhost:3000"
 
 cors_origins = [
     origin.strip()
@@ -40,6 +42,8 @@ cors_origins = [
     ).split(",")
     if origin.strip()
 ]
+if FRONTEND_URL not in cors_origins:
+    cors_origins.append(FRONTEND_URL)
 
 app = FastAPI()
 app.add_middleware(
@@ -54,7 +58,6 @@ app.add_middleware(
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").strip() or "http://localhost:3000"
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:8000/auth/callback").strip()
@@ -425,6 +428,26 @@ init_db()
 
 def utc_now():
     return datetime.now(timezone.utc)
+
+
+def is_local_origin(url: str) -> bool:
+    try:
+        hostname = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return hostname in {"localhost", "127.0.0.1"} or hostname.endswith(".localhost")
+
+
+def get_cookie_samesite() -> str:
+    if COOKIE_SAMESITE_ENV in {"lax", "strict", "none"}:
+        return COOKIE_SAMESITE_ENV
+    return "lax" if is_local_origin(FRONTEND_URL) else "none"
+
+
+def get_cookie_secure() -> bool:
+    if COOKIE_SECURE_ENV in {"true", "false"}:
+        return COOKIE_SECURE_ENV == "true"
+    return get_cookie_samesite() == "none" or FRONTEND_URL.startswith("https://")
 
 
 def safe_topic(text: str) -> str:
@@ -1527,15 +1550,22 @@ def create_session_token(user_id: int) -> str:
 
 
 def set_session_cookie(response: Response, token: str):
+    cookie_samesite = get_cookie_samesite()
+    cookie_secure = get_cookie_secure()
     response.set_cookie(
         key=SESSION_COOKIE, value=token,
-        httponly=True, samesite=COOKIE_SAMESITE, secure=COOKIE_SECURE,
+        httponly=True, samesite=cookie_samesite, secure=cookie_secure,
         max_age=SESSION_DAYS * 24 * 60 * 60,
     )
 
 
 def clear_session_cookie(response: Response):
-    response.delete_cookie(key=SESSION_COOKIE)
+    response.delete_cookie(
+        key=SESSION_COOKIE,
+        httponly=True,
+        samesite=get_cookie_samesite(),
+        secure=get_cookie_secure(),
+    )
 
 
 def serialize_user(row) -> dict:
@@ -1735,7 +1765,12 @@ def home():
 @app.get("/auth/google")
 def google_auth(kirigumi_session: Optional[str] = Cookie(default=None)):
     require_google_oauth_config()
-    user = get_current_user(kirigumi_session)
+    try:
+        user = get_current_user(kirigumi_session)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return RedirectResponse(f"{FRONTEND_URL}?classroom=error&reason=auth_required")
+        raise
     state = create_google_oauth_state(user["id"])
     auth_url = requests.Request(
         "GET",

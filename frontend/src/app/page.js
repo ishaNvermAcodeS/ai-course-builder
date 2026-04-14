@@ -2429,8 +2429,21 @@ export default function Home() {
       return;
     }
     setClassroomLoading(true);
-    window.location.href = `${API_BASE}/auth/google`;
-  }, [currentUser, topic, activeTopic, activeLevel, course, refreshRecommendations]);
+    setClassroomError("");
+    try {
+      const liveSession = await loadSession();
+      if (!liveSession) {
+        setCurrentUser(null);
+        setShowAuth(true);
+        setClassroomError("Your sign-in session expired. Please sign in again, then reconnect Google Classroom.");
+        return;
+      }
+      setCurrentUser(liveSession);
+      window.location.assign(`${API_BASE}/auth/google`);
+    } finally {
+      setClassroomLoading(false);
+    }
+  }, [currentUser]);
 
   const loadWorkspaceCourses = useCallback(async (prefillCourseId = "") => {
     if (!currentUser || !classroomData?.connected) return;
@@ -2526,6 +2539,7 @@ export default function Home() {
     if (!currentUser) return;
     const params = new URLSearchParams(window.location.search);
     const classroomState = params.get("classroom");
+    const classroomReason = params.get("reason");
     if (!classroomState) return;
     const finalize = async () => {
       if (classroomState === "connected") {
@@ -2543,7 +2557,11 @@ export default function Home() {
           setClassroomError(getErrorMessage(e, "Google Classroom connected, but sync failed."));
         }
       } else if (classroomState === "error") {
-        setClassroomError("Google Classroom connection was cancelled or failed.");
+        setClassroomError(
+          classroomReason === "auth_required"
+            ? "Please sign in again before connecting Google Classroom."
+            : "Google Classroom connection was cancelled or failed."
+        );
       }
       params.delete("classroom");
       params.delete("reason");
