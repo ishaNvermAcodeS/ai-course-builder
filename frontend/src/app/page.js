@@ -4,9 +4,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } fr
 import { createPortal } from "react-dom";
 import axios from "axios";
 
-const API_HOST =
-  typeof window !== "undefined" ? window.location.hostname : "127.0.0.1";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || `http://${API_HOST}:8000`;
+const API_BASE = "/api";
 
 axios.defaults.withCredentials = true;
 
