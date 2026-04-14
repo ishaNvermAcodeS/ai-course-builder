@@ -149,9 +149,26 @@ def db_fetchall(conn, query: str, params=()):
     return db_execute(conn, query, params).fetchall()
 
 
+def postgres_table_exists(conn, table_name: str) -> bool:
+    row = db_fetchone(
+        conn,
+        """SELECT 1
+           FROM information_schema.tables
+           WHERE table_schema = 'public' AND table_name = ?
+           LIMIT 1""",
+        (table_name,),
+    )
+    return bool(row)
+
+
 def init_db():
     conn = get_db()
     if uses_postgres():
+        if postgres_table_exists(conn, "users"):
+            ensure_classroom_connection_columns(conn)
+            conn.commit()
+            conn.close()
+            return
         statements = [
             """
             CREATE TABLE IF NOT EXISTS users (
