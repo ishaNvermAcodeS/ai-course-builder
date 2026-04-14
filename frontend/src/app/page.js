@@ -1889,19 +1889,19 @@ function ClassroomSnapshotCard({ classroomData, onConnectClassroom, classroomLoa
   );
 }
 
-function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId, coursework, announcements, insights, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onConnectClassroom }) {
+function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId, coursework, announcements, allAnnouncements, insights, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onConnectClassroom }) {
   const selectedCourse = classroomCourses.find((course) => course.id === selectedCourseId) || null;
   const notifications = classroomData?.notifications || { urgent: [], upcoming: [], overdue: [] };
   const notificationsFeed = [
     ...(notifications.overdue || []).map((item) => ({ ...item, tone: "overdue", kind: "Deadline" })),
     ...(notifications.urgent || []).map((item) => ({ ...item, tone: "urgent", kind: "Upcoming" })),
     ...(notifications.upcoming || []).map((item) => ({ ...item, tone: "upcoming", kind: "Planned" })),
-    ...announcements.slice(0, 4).map((item) => ({
+    ...(allAnnouncements || []).map((item) => ({
       id: item.id,
       title: item.text || "Announcement",
       description: item.text || "",
-      due_at: item.update_time || "",
-      course_name: selectedCourse?.name || "Selected course",
+      due_at: item.update_time || item.creation_time || "",
+      course_name: item.course_name || "Google Classroom",
       tone: "upcoming",
       kind: "Announcement",
     })),
@@ -2041,7 +2041,7 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
   );
 }
 
-function ClassroomSidePanel({ open, onClose, classroomData, classroomCourses, selectedCourseId, coursework, announcements, insights, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onConnectClassroom }) {
+function ClassroomSidePanel({ open, onClose, classroomData, classroomCourses, selectedCourseId, coursework, announcements, allAnnouncements, insights, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onConnectClassroom }) {
   useScrollLock();
 
   useEffect(() => {
@@ -2071,6 +2071,7 @@ function ClassroomSidePanel({ open, onClose, classroomData, classroomCourses, se
             selectedCourseId={selectedCourseId}
             coursework={coursework}
             announcements={announcements}
+            allAnnouncements={allAnnouncements}
             insights={insights}
             loadingCourses={loadingCourses}
             loadingDetails={loadingDetails}
@@ -2290,6 +2291,7 @@ export default function Home() {
   const [classroomSelectedCourseId, setClassroomSelectedCourseId] = useState("");
   const [classroomCoursework, setClassroomCoursework] = useState([]);
   const [classroomAnnouncements, setClassroomAnnouncements] = useState([]);
+  const [classroomAllAnnouncements, setClassroomAllAnnouncements] = useState([]);
   const [classroomInsights, setClassroomInsights] = useState(null);
   const [classroomLoading, setClassroomLoading] = useState(false);
   const [classroomWorkspaceLoading, setClassroomWorkspaceLoading] = useState(false);
@@ -2310,6 +2312,7 @@ export default function Home() {
   const classroomSelectedCourseRef = useRef("");
   const classroomDetailsRequestRef = useRef(0);
   const classroomCourseDetailsCacheRef = useRef({});
+  const classroomAnnouncementFeedCacheRef = useRef({});
   const [viewState, setViewState] = useState("home");
 
   const getTotalTopics = (c) => c?.chapters?.reduce((a, ch) => a + ch.topics.length, 0) ?? 0;
@@ -2461,7 +2464,20 @@ export default function Home() {
 
   useEffect(() => {
     classroomCourseDetailsCacheRef.current = {};
+    classroomAnnouncementFeedCacheRef.current = {};
+    setClassroomAllAnnouncements([]);
   }, [currentUser?.id]);
+
+  const rebuildAnnouncementFeed = useCallback(() => {
+    const merged = Object.values(classroomAnnouncementFeedCacheRef.current)
+      .flat()
+      .sort((a, b) => {
+        const aTime = new Date(a.update_time || a.creation_time || 0).getTime();
+        const bTime = new Date(b.update_time || b.creation_time || 0).getTime();
+        return bTime - aTime;
+      });
+    setClassroomAllAnnouncements(merged);
+  }, []);
 
   const loadWorkspaceCourses = useCallback(async (prefillCourseId = "") => {
     if (!currentUser || !classroomData?.connected) return;
@@ -2508,6 +2524,13 @@ export default function Home() {
         announcements: annRes.announcements || [],
       };
       classroomCourseDetailsCacheRef.current[courseId] = nextDetails;
+      const courseName = classroomCourses.find((course) => course.id === courseId)?.name || "Google Classroom";
+      classroomAnnouncementFeedCacheRef.current[courseId] = nextDetails.announcements.map((item) => ({
+        ...item,
+        course_id: courseId,
+        course_name: courseName,
+      }));
+      rebuildAnnouncementFeed();
       setClassroomCoursework(nextDetails.coursework);
       setClassroomAnnouncements(nextDetails.announcements);
     } catch (e) {
@@ -2519,7 +2542,31 @@ export default function Home() {
         setClassroomDetailsLoading(false);
       }
     }
-  }, [currentUser]);
+  }, [currentUser, classroomCourses, rebuildAnnouncementFeed]);
+
+  const preloadClassroomAnnouncements = useCallback(async (courses) => {
+    const missingCourses = (courses || []).filter((course) => !classroomAnnouncementFeedCacheRef.current[course.id]);
+    if (!missingCourses.length) return;
+    const results = await Promise.allSettled(
+      missingCourses.map(async (course) => {
+        const response = await loadClassroomAnnouncements(course.id);
+        return {
+          courseId: course.id,
+          courseName: course.name,
+          announcements: response.announcements || [],
+        };
+      })
+    );
+    results.forEach((result) => {
+      if (result.status !== "fulfilled") return;
+      classroomAnnouncementFeedCacheRef.current[result.value.courseId] = result.value.announcements.map((item) => ({
+        ...item,
+        course_id: result.value.courseId,
+        course_name: result.value.courseName,
+      }));
+    });
+    rebuildAnnouncementFeed();
+  }, [rebuildAnnouncementFeed]);
 
   const handleAnalyzeClassroom = useCallback(async (courseId = classroomSelectedCourseId) => {
     if (!currentUser || !classroomData?.connected) return;
@@ -2572,6 +2619,8 @@ export default function Home() {
         setClassroomData(data);
         setUseClassroomData((prev) => prev && !!data?.connected);
         classroomCourseDetailsCacheRef.current = {};
+        classroomAnnouncementFeedCacheRef.current = {};
+        setClassroomAllAnnouncements([]);
       } catch {
         setClassroomData(null);
       }
@@ -2591,6 +2640,8 @@ export default function Home() {
           const data = await refreshClassroomData();
           setClassroomData(data);
           classroomCourseDetailsCacheRef.current = {};
+          classroomAnnouncementFeedCacheRef.current = {};
+          setClassroomAllAnnouncements([]);
           setUseClassroomData(true);
           setClassroomInfoOpen(true);
           setClassroomToastTick((prev) => prev + 1);
@@ -2620,6 +2671,11 @@ export default function Home() {
     if (!classroomPanelOpen || !classroomData?.connected || classroomCourses.length > 0) return;
     loadWorkspaceCourses(classroomSelectedCourseRef.current);
   }, [classroomPanelOpen, classroomData?.connected, classroomCourses.length, loadWorkspaceCourses]);
+
+  useEffect(() => {
+    if (!classroomPanelOpen || !classroomCourses.length) return;
+    preloadClassroomAnnouncements(classroomCourses);
+  }, [classroomPanelOpen, classroomCourses, preloadClassroomAnnouncements]);
 
   useEffect(() => {
     if (!classroomSelectedCourseId || !classroomData?.connected) return;
@@ -5122,6 +5178,7 @@ export default function Home() {
         selectedCourseId={classroomSelectedCourseId}
         coursework={classroomCoursework}
         announcements={classroomAnnouncements}
+        allAnnouncements={classroomAllAnnouncements}
         insights={classroomInsights}
         loadingCourses={classroomWorkspaceLoading}
         loadingDetails={classroomDetailsLoading}
