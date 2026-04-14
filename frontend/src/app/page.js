@@ -1892,6 +1892,11 @@ function ClassroomSnapshotCard({ classroomData, onConnectClassroom, classroomLoa
 function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId, coursework, announcements, insights, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onConnectClassroom }) {
   const selectedCourse = classroomCourses.find((course) => course.id === selectedCourseId) || null;
   const notifications = classroomData?.notifications || { urgent: [], upcoming: [], overdue: [] };
+  const notificationsFeed = [
+    ...(notifications.overdue || []).map((item) => ({ ...item, tone: "overdue", kind: "Deadline" })),
+    ...(notifications.urgent || []).map((item) => ({ ...item, tone: "urgent", kind: "Upcoming" })),
+    ...(notifications.upcoming || []).map((item) => ({ ...item, tone: "upcoming", kind: "Planned" })),
+  ];
 
   return (
     <div className="classroom-workspace">
@@ -1938,16 +1943,18 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
 
         <div className="cw-grid">
           <div className="cw-card">
-            <div className="cw-card-label">Notifications</div>
-            {[...(notifications.overdue || []), ...(notifications.urgent || []), ...(notifications.upcoming || [])].length > 0 ? (
-              [...(notifications.overdue || []), ...(notifications.urgent || []), ...(notifications.upcoming || [])].slice(0, 5).map((item, index) => (
-                <div key={`${item.id || item.title}-${index}`} className="cw-line">
-                  <strong>{item.title}</strong>
-                  <span>{item.course_name || "Classroom"}</span>
+            <div className="cw-card-label">Announcements</div>
+            {loadingDetails ? (
+              <div className="cw-empty-card"><span className="spin spin-sm" /> Loading announcements…</div>
+            ) : announcements.length > 0 ? (
+              announcements.map((item) => (
+                <div key={item.id} className="cw-assignment-card">
+                  <div className="cw-assignment-title">{item.text || "Announcement"}</div>
+                  <div className="cw-assignment-meta">{item.update_time ? new Date(item.update_time).toLocaleString() : "No timestamp"}</div>
                 </div>
               ))
             ) : (
-              <div className="rec-empty">Deadlines and reminders will appear here after sync.</div>
+              <div className="rec-empty">Announcements for the selected course will appear here.</div>
             )}
           </div>
 
@@ -1964,23 +1971,7 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
                 </div>
               ))
             ) : (
-              <div className="rec-empty">Select a course to view coursework.</div>
-            )}
-          </div>
-
-          <div className="cw-card">
-            <div className="cw-card-label">Announcements</div>
-            {loadingDetails ? (
-              <div className="cw-empty-card"><span className="spin spin-sm" /> Loading announcements…</div>
-            ) : announcements.length > 0 ? (
-              announcements.map((item) => (
-                <div key={item.id} className="cw-assignment-card">
-                  <div className="cw-assignment-title">{item.text || "Announcement"}</div>
-                  <div className="cw-assignment-meta">{item.update_time ? new Date(item.update_time).toLocaleString() : "No timestamp"}</div>
-                </div>
-              ))
-            ) : (
-              <div className="rec-empty">Announcements for the selected course will appear here.</div>
+              <div className="rec-empty">Assignments for the selected course will appear here.</div>
             )}
           </div>
 
@@ -2015,6 +2006,27 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
             )}
           </div>
         </div>
+      </div>
+
+      <div className="classroom-workspace-feed">
+        <div className="cw-section-eyebrow">Notifications</div>
+        {notificationsFeed.length > 0 ? (
+          <div className="cw-feed-list">
+            {notificationsFeed.map((item, index) => (
+              <div key={`${item.id || item.title}-${index}`} className={`cw-feed-item cw-feed-${item.tone}`}>
+                <div className="cw-feed-top">
+                  <span className={`cw-feed-badge cw-feed-badge-${item.tone}`}>{item.kind}</span>
+                  <span className="cw-feed-course">{item.course_name || "Google Classroom"}</span>
+                </div>
+                <div className="cw-feed-title">{item.title || "Classroom item"}</div>
+                {item.description && <div className="cw-feed-desc">{item.description}</div>}
+                <div className="cw-feed-meta">{item.due_at ? `Due ${new Date(item.due_at).toLocaleString()}` : "No due date"}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="cw-empty-card">Every assignment deadline and synced classroom reminder will appear here.</div>
+        )}
       </div>
     </div>
   );
@@ -2286,6 +2298,8 @@ export default function Home() {
   // Dark mode: default is false (light/cyan theme)
   const lessonCache = useRef({});
   const typedTopics = useRef(new Set());
+  const classroomSelectedCourseRef = useRef("");
+  const classroomDetailsRequestRef = useRef(0);
   const [viewState, setViewState] = useState("home");
 
   const getTotalTopics = (c) => c?.chapters?.reduce((a, ch) => a + ch.topics.length, 0) ?? 0;
@@ -2431,6 +2445,10 @@ export default function Home() {
     window.location.assign(`${API_BASE}/auth/google`);
   }, [currentUser]);
 
+  useEffect(() => {
+    classroomSelectedCourseRef.current = classroomSelectedCourseId;
+  }, [classroomSelectedCourseId]);
+
   const loadWorkspaceCourses = useCallback(async (prefillCourseId = "") => {
     if (!currentUser || !classroomData?.connected) return;
     setClassroomWorkspaceLoading(true);
@@ -2439,30 +2457,41 @@ export default function Home() {
       const data = await loadClassroomCourses();
       const courses = data.courses || [];
       setClassroomCourses(courses);
-      const nextCourseId = prefillCourseId || classroomSelectedCourseId || courses[0]?.id || "";
-      if (nextCourseId) setClassroomSelectedCourseId(nextCourseId);
+      const preferredCourseId = prefillCourseId || classroomSelectedCourseRef.current;
+      const hasPreferredCourse = preferredCourseId && courses.some((course) => course.id === preferredCourseId);
+      const nextCourseId = hasPreferredCourse ? preferredCourseId : (courses[0]?.id || "");
+      if (nextCourseId && nextCourseId !== classroomSelectedCourseRef.current) {
+        setClassroomSelectedCourseId(nextCourseId);
+      }
     } catch (e) {
       console.error(e);
       setClassroomError(getErrorMessage(e, "Could not load Google Classroom courses right now."));
     } finally {
       setClassroomWorkspaceLoading(false);
     }
-  }, [currentUser, classroomData?.connected, classroomSelectedCourseId]);
+  }, [currentUser, classroomData?.connected]);
 
   const loadCourseDetails = useCallback(async (courseId) => {
     if (!courseId || !currentUser) return;
+    classroomDetailsRequestRef.current += 1;
+    const requestId = classroomDetailsRequestRef.current;
+    setClassroomSelectedCourseId(courseId);
     setClassroomDetailsLoading(true);
     setClassroomError("");
+    setClassroomInsights(null);
     try {
       const [workRes, annRes] = await Promise.all([loadClassroomCoursework(courseId), loadClassroomAnnouncements(courseId)]);
+      if (requestId !== classroomDetailsRequestRef.current) return;
       setClassroomCoursework(workRes.coursework || []);
       setClassroomAnnouncements(annRes.announcements || []);
-      setClassroomSelectedCourseId(courseId);
     } catch (e) {
+      if (requestId !== classroomDetailsRequestRef.current) return;
       console.error(e);
       setClassroomError(getErrorMessage(e, "Could not load classroom details right now."));
     } finally {
-      setClassroomDetailsLoading(false);
+      if (requestId === classroomDetailsRequestRef.current) {
+        setClassroomDetailsLoading(false);
+      }
     }
   }, [currentUser]);
 
@@ -2490,9 +2519,11 @@ export default function Home() {
       handleConnectClassroom();
       return;
     }
-    loadWorkspaceCourses(classroomSelectedCourseId);
     setClassroomPanelOpen(true);
-  }, [currentUser, classroomData?.connected, handleConnectClassroom, loadWorkspaceCourses, classroomSelectedCourseId]);
+    if (!classroomCourses.length) {
+      loadWorkspaceCourses(classroomSelectedCourseRef.current);
+    }
+  }, [currentUser, classroomData?.connected, handleConnectClassroom, classroomCourses.length, loadWorkspaceCourses]);
 
   useEffect(() => {
     refreshProfileCourses();
@@ -2558,9 +2589,9 @@ export default function Home() {
   }, [currentUser, course, activeTopic, activeLevel, refreshRecommendations]);
 
   useEffect(() => {
-    if (!classroomData?.connected) return;
-    loadWorkspaceCourses();
-  }, [classroomData?.connected, loadWorkspaceCourses]);
+    if (!classroomPanelOpen || !classroomData?.connected || classroomCourses.length > 0) return;
+    loadWorkspaceCourses(classroomSelectedCourseRef.current);
+  }, [classroomPanelOpen, classroomData?.connected, classroomCourses.length, loadWorkspaceCourses]);
 
   useEffect(() => {
     if (!classroomSelectedCourseId || !classroomData?.connected) return;
@@ -3447,24 +3478,27 @@ export default function Home() {
         }
         .classroom-workspace {
           display:grid;
-          grid-template-columns:280px minmax(0, 1fr);
-          gap:16px;
+          grid-template-columns:280px minmax(0, 1fr) 280px;
+          gap:18px;
           margin-top:0;
         }
         .classroom-workspace-sidebar,
-        .classroom-workspace-main {
+        .classroom-workspace-main,
+        .classroom-workspace-feed {
           border:1px solid var(--border);
           border-radius:20px;
           background:rgba(255,255,255,.72);
           box-shadow:0 18px 50px rgba(8,145,178,.08);
         }
         body.dark-mode .classroom-workspace-sidebar,
-        body.dark-mode .classroom-workspace-main {
+        body.dark-mode .classroom-workspace-main,
+        body.dark-mode .classroom-workspace-feed {
           background:rgba(255,255,255,.03);
           box-shadow:none;
         }
         .classroom-workspace-sidebar { padding:18px; align-self:start; }
         .classroom-workspace-main { padding:18px; min-width:0; }
+        .classroom-workspace-feed { padding:18px; align-self:start; }
         .cw-section-eyebrow {
           font-family:var(--ff-mono);
           font-size:9px;
@@ -3523,7 +3557,10 @@ export default function Home() {
         .cw-study-btn:disabled { opacity:.55; cursor:not-allowed; }
         .cw-grid {
           display:grid;
-          grid-template-columns:repeat(2, minmax(0, 1fr));
+          grid-template-columns:minmax(0, 1fr) minmax(240px, .85fr);
+          grid-template-areas:
+            "announcements insights"
+            "assignments insights";
           gap:14px;
         }
         .cw-card {
@@ -3533,6 +3570,9 @@ export default function Home() {
           background:var(--surface);
           min-width:0;
         }
+        .cw-grid .cw-card:nth-child(1) { grid-area:announcements; }
+        .cw-grid .cw-card:nth-child(2) { grid-area:assignments; }
+        .cw-grid .cw-card:nth-child(3) { grid-area:insights; }
         .cw-card-label,
         .cw-mini-label {
           font-family:var(--ff-mono);
@@ -3572,6 +3612,63 @@ export default function Home() {
           font-size:.82rem;
           font-weight:700;
         }
+        .cw-feed-list {
+          display:flex;
+          flex-direction:column;
+          gap:12px;
+        }
+        .cw-feed-item {
+          border:1px solid var(--border);
+          border-radius:16px;
+          padding:14px;
+          background:var(--surface);
+          display:flex;
+          flex-direction:column;
+          gap:8px;
+        }
+        .cw-feed-top {
+          display:flex;
+          flex-wrap:wrap;
+          align-items:center;
+          gap:8px;
+        }
+        .cw-feed-badge {
+          display:inline-flex;
+          align-items:center;
+          justify-content:center;
+          min-height:24px;
+          padding:4px 10px;
+          border-radius:999px;
+          font-family:var(--ff-mono);
+          font-size:9px;
+          letter-spacing:.12em;
+          text-transform:uppercase;
+          font-weight:700;
+        }
+        .cw-feed-badge-overdue { background:rgba(239,68,68,.12); color:var(--red); }
+        .cw-feed-badge-urgent { background:rgba(249,115,22,.12); color:var(--orange); }
+        .cw-feed-badge-upcoming { background:var(--accent-dim); color:var(--accent); }
+        .cw-feed-course {
+          color:var(--text3);
+          font-size:.78rem;
+          font-weight:700;
+        }
+        .cw-feed-title {
+          color:var(--text);
+          font-family:var(--ff-head);
+          font-size:.95rem;
+          font-weight:800;
+          line-height:1.45;
+        }
+        .cw-feed-desc {
+          color:var(--text2);
+          font-size:.83rem;
+          line-height:1.55;
+        }
+        .cw-feed-meta {
+          color:var(--text3);
+          font-size:.76rem;
+        }
         .gc-overlay {
           position:fixed;
           inset:0;
@@ -3586,7 +3683,7 @@ export default function Home() {
         }
         body.dark-mode .gc-overlay { background:rgba(5,5,14,.9); }
         .gc-panel {
-          width:min(1080px, 100vw);
+          width:min(1380px, 100vw);
           background:#ffffff;
           border-left:1px solid var(--border2);
           display:flex;
@@ -4894,6 +4991,7 @@ export default function Home() {
           .home-classroom-card{padding:16px;margin-top:-6px}
           .classroom-workspace{grid-template-columns:1fr}
           .cw-grid,.home-classroom-grid{grid-template-columns:1fr}
+          .cw-grid{grid-template-areas:"announcements" "assignments" "insights"}
           .home-classroom-header{flex-direction:column;align-items:stretch}
           .hero-controls-row,.hero-controls-row-bottom{grid-template-columns:1fr}
           .hero-topic-input,.hero-control,.classroom-toggle,.classroom-connect-btn,.hero-generate-btn{width:100%}
