@@ -1436,6 +1436,176 @@ def find_material_in_course(user_id: int, course_id: str, item_id: str, material
     raise HTTPException(status_code=404, detail="The requested classroom file was not found.")
 
 
+def load_classroom_material_document(user_id: int, course_id: str, item_id: str, material_id: str, item_kind: str = "coursework"):
+    source_kind, item, material = find_material_in_course(user_id, course_id, item_id, material_id, item_kind)
+    extraction_notice = ""
+    extracted_text = ""
+    detected_mime_type = material.get("mime_type") or ""
+    file_name = safe_topic(material.get("title") or "Classroom file")
+    try:
+        file_bytes, detected_mime_type, file_name = download_drive_material_bytes(user_id, material)
+        extracted_text = truncate_text(
+            extract_text_from_file_bytes(file_bytes, detected_mime_type, file_name),
+            DOCUMENT_TEXT_LIMIT,
+        )
+    except HTTPException as exc:
+        if exc.status_code in {400, 415}:
+            extraction_notice = exc.detail
+        else:
+            raise
+    item_title = safe_topic(item.get("title") or item.get("text") or "Classroom item")
+    item_description = safe_topic(item.get("description") or item.get("text") or "")
+    content_for_analysis = extracted_text or truncate_text(
+        f"Title: {item_title}\nDescription: {item_description}\nMaterial: {material.get('title') or ''}"
+    )
+    return {
+        "source_kind": source_kind,
+        "item": item,
+        "material": material,
+        "item_title": item_title,
+        "item_description": item_description,
+        "content": content_for_analysis,
+        "extraction_notice": extraction_notice,
+        "mime_type": detected_mime_type,
+        "file_name": file_name,
+    }
+
+
+def classify_document_fast(item_title: str, item_description: str, material_title: str, content: str):
+    sample = (f"{item_title}\n{item_description}\n{material_title}\n{content}" or "").lower()
+    question_patterns = [
+        r"\bq[\.\s]?\d+\b",
+        r"\bquestion\s+\d+\b",
+        r"\bpart\s+[a-z]\b",
+        r"\bsolve\b",
+        r"\bfind\b",
+        r"\bcalculate\b",
+        r"\bprove\b",
+        r"\bwrite short notes\b",
+        r"\banswer\b",
+        r"\?\s*$",
+    ]
+    theory_patterns = [
+        r"\bintroduction\b",
+        r"\boverview\b",
+        r"\bdefinition\b",
+        r"\bconcept\b",
+        r"\bprinciple\b",
+        r"\bmodule\b",
+        r"\bchapter\b",
+        r"\bunit\b",
+        r"\blearning objective\b",
+        r"\bexample\b",
+        r"\bsummary\b",
+    ]
+    question_score = sum(len(re.findall(pattern, sample, flags=re.MULTILINE)) for pattern in question_patterns)
+    theory_score = sum(len(re.findall(pattern, sample, flags=re.MULTILINE)) for pattern in theory_patterns)
+    numbered_lines = len(re.findall(r"^\s*(?:\d+[\.\)]|[a-zA-Z][\.\)])\s+", sample, flags=re.MULTILINE))
+    question_score += numbered_lines
+    title_text = f"{item_title} {material_title}".lower()
+    if re.search(r"\bassignment|worksheet|homework|problem set|question paper|ct\b|exam|quiz|test\b", title_text):
+        question_score += 5
+    if re.search(r"\bnotes|syllabus|module|lecture|unit|chapter|handout|reference|answer key|solution key\b", title_text):
+        theory_score += 4
+    detected_type = "assignment" if question_score > theory_score + 1 else "study"
+    return {
+        "detected_type": detected_type,
+        "question_score": question_score,
+        "theory_score": theory_score,
+        "confidence": round(abs(question_score - theory_score) / max(question_score + theory_score, 1), 2),
+    }
+
+
+def generate_document_workspace_outline(title: str, level: str, content: str):
+    prompt = f"""
+Create a course-style learning outline from this study document.
+
+Return valid JSON with:
+- course_title: short title
+- summary: 2-3 concise sentences
+- chapters: array of objects with:
+  - title
+  - topics: 3 to 5 short lesson titles
+
+Rules:
+- Build the outline only from the document content.
+- Keep chapter titles crisp and lesson titles specific.
+- Use 2 to 5 chapters depending on the material.
+- No markdown fences.
+
+Document title: {title}
+Level: {level}
+
+Document content:
+{content}
+"""
+    outline = sanitize_course_outline(parse_json_object(call_llm(prompt, max_tokens=1400)))
+    summary_prompt = f"""
+Summarize this study document in 2 to 3 crisp sentences for a student.
+
+Title: {title}
+Level: {level}
+Content:
+{content}
+"""
+    summary = safe_topic(call_llm(summary_prompt, max_tokens=180))
+    outline["summary"] = summary
+    return outline
+
+
+def generate_document_lesson_text(course_title: str, module: str, level: str, content: str):
+    prompt = f"""
+Create a lesson from the uploaded study document.
+
+Course Title: {course_title}
+Lesson Topic: {module}
+Level: {level}
+
+Rules:
+- Use only the document as the main source.
+- Keep the lesson grounded in the uploaded material.
+- Format with sections: Introduction, Core Explanation, Examples, Key Points, Summary.
+- Include helpful examples when the document supports them.
+- No markdown fences.
+
+Document content:
+{content}
+"""
+    return call_llm(prompt, max_tokens=1500)
+
+
+SOLVE_STYLE_GUIDE = {
+    "human": "Solve it like a strong human tutor would: natural, clear, not robotic, with intuitive explanations.",
+    "deep": "Solve it in a deeper, more rigorous way: include reasoning, derivations, and why each step is valid.",
+    "exam": "Solve it like an exam answer: structured, direct, marks-oriented, and efficient.",
+    "step": "Solve it step by step for a beginner: slow pacing, no skipped steps, simple explanations.",
+}
+
+
+def generate_assignment_solution_text(title: str, level: str, content: str, style: str):
+    style_key = style if style in SOLVE_STYLE_GUIDE else "human"
+    prompt = f"""
+You are solving an assignment from an uploaded classroom file.
+
+Assignment title: {title}
+Level: {level}
+Solve style: {style_key}
+Style guidance: {SOLVE_STYLE_GUIDE[style_key]}
+
+Rules:
+- Solve the questions present in the assignment.
+- Preserve question numbering when possible.
+- Show working clearly.
+- If the file includes both questions and theory, focus on answering the questions.
+- If some question text is incomplete, say what is missing briefly and solve what is available.
+- No markdown fences.
+
+Assignment content:
+{content}
+"""
+    return call_llm(prompt, max_tokens=2200)
+
+
 def fetch_google_classroom_courses(user_id: int) -> list:
     payload = google_classroom_get(user_id, "/courses", {"courseStates": "ACTIVE"})
     courses = []
@@ -1994,6 +2164,33 @@ class ClassroomMaterialAnalyzeRequest(BaseModel):
     level: Optional[str] = "Intermediate"
 
 
+class ClassroomMaterialWorkspaceRequest(BaseModel):
+    course_id: str
+    item_id: str
+    material_id: str
+    item_kind: Optional[str] = "coursework"
+    level: Optional[str] = "Intermediate"
+
+
+class ClassroomMaterialLessonRequest(BaseModel):
+    course_id: str
+    item_id: str
+    material_id: str
+    item_kind: Optional[str] = "coursework"
+    level: Optional[str] = "Intermediate"
+    course_title: str
+    module: str
+
+
+class ClassroomMaterialSolveRequest(BaseModel):
+    course_id: str
+    item_id: str
+    material_id: str
+    item_kind: Optional[str] = "coursework"
+    level: Optional[str] = "Intermediate"
+    style: Optional[str] = "human"
+
+
 class AutonomousTriggerRequest(BaseModel):
     course_topic: str
     level: str
@@ -2335,10 +2532,10 @@ def classroom_analyze(request: ClassroomAnalyzeRequest, kirigumi_session: Option
     prompt = f"""
 You are an academic planning assistant.
 Use the classroom data below to produce a JSON object with:
-- study_plan: array of 4 to 6 concise steps
+- study_plan: array of 3 to 5 concise steps
 - reminders: array of short reminders
 - key_topics: array of likely key topics to study
-- summary: one short paragraph
+- summary: one crisp paragraph with the selected course summary, urgent deadlines, and best next move
 
 Courses:
 {json.dumps(courses, indent=2)}
@@ -2365,40 +2562,29 @@ def classroom_material_analyze(request: ClassroomMaterialAnalyzeRequest, kirigum
     course_id = safe_topic(request.course_id)
     item_id = safe_topic(request.item_id)
     material_id = safe_topic(request.material_id)
-    source_kind, item, material = find_material_in_course(
+    material_doc = load_classroom_material_document(
         user["id"],
         course_id,
         item_id,
         material_id,
         request.item_kind or "coursework",
     )
-
-    extraction_notice = ""
-    extracted_text = ""
-    try:
-        file_bytes, detected_mime_type, file_name = download_drive_material_bytes(user["id"], material)
-        extracted_text = truncate_text(
-            extract_text_from_file_bytes(file_bytes, detected_mime_type, file_name),
-            DOCUMENT_TEXT_LIMIT,
-        )
-    except HTTPException as exc:
-        if exc.status_code in {400, 415}:
-            extraction_notice = exc.detail
-        else:
-            raise
-
-    item_title = safe_topic(item.get("title") or item.get("text") or "Classroom item")
-    item_description = safe_topic(item.get("description") or item.get("text") or "")
+    source_kind = material_doc["source_kind"]
+    item = material_doc["item"]
+    material = material_doc["material"]
+    item_title = material_doc["item_title"]
+    item_description = material_doc["item_description"]
+    extraction_notice = material_doc["extraction_notice"]
     level = request.level if request.level in difficulty_guide else "Intermediate"
-    requested_type = safe_topic(request.analysis_type or "study").lower()
-    assignment_like = requested_type == "assignment" or any(
-        keyword in f"{item_title} {item_description} {(material.get('title') or '')}".lower()
-        for keyword in ("assignment", "worksheet", "homework", "problem set", "quiz", "lab")
+    doc_classification = classify_document_fast(
+        item_title,
+        item_description,
+        material.get("title") or "",
+        material_doc["content"],
     )
-    analysis_mode = "assignment" if assignment_like else "study"
-    content_for_analysis = extracted_text or truncate_text(
-        f"Title: {item_title}\nDescription: {item_description}\nMaterial: {material.get('title') or ''}"
-    )
+    requested_type = safe_topic(request.analysis_type or "").lower()
+    analysis_mode = requested_type if requested_type in {"study", "assignment"} else doc_classification["detected_type"]
+    content_for_analysis = material_doc["content"]
 
     prompt = f"""
 You are an academic document analyst.
@@ -2436,7 +2622,7 @@ Document text:
         "item_kind": source_kind,
         "material": material,
         "analysis": {
-            "detected_type": "assignment" if analysis_mode == "assignment" else safe_topic(analysis.get("detected_type") or "study").lower(),
+            "detected_type": "assignment" if analysis_mode == "assignment" else safe_topic(analysis.get("detected_type") or doc_classification["detected_type"]).lower(),
             "search_topic": search_topic,
             "summary": safe_topic(analysis.get("summary")),
             "key_points": analysis.get("key_points") if isinstance(analysis.get("key_points"), list) else [],
@@ -2444,10 +2630,113 @@ Document text:
             "assignment_solution": strip_fences(str(analysis.get("assignment_solution") or "")),
             "extraction_notice": extraction_notice,
             "source_excerpt": content_for_analysis,
+            "classification": doc_classification,
         },
         "youtube_resources": videos,
         "web_resources": web_payload.get("articles", []),
         "web_resources_error": web_payload.get("error", ""),
+    }
+
+
+@app.post("/classroom/materials/workspace")
+def classroom_material_workspace(request: ClassroomMaterialWorkspaceRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
+    course_id = safe_topic(request.course_id)
+    item_id = safe_topic(request.item_id)
+    material_id = safe_topic(request.material_id)
+    level = request.level if request.level in difficulty_guide else "Intermediate"
+    material_doc = load_classroom_material_document(
+        user["id"],
+        course_id,
+        item_id,
+        material_id,
+        request.item_kind or "coursework",
+    )
+    classification = classify_document_fast(
+        material_doc["item_title"],
+        material_doc["item_description"],
+        material_doc["material"].get("title") or "",
+        material_doc["content"],
+    )
+    if classification["detected_type"] == "assignment":
+        return {
+            "mode": "assignment",
+            "classification": classification,
+            "title": safe_topic(material_doc["material"].get("title") or material_doc["item_title"] or "Assignment"),
+            "summary": safe_topic(material_doc["item_description"]),
+            "style_options": [
+                {"id": "human", "label": "Human Way"},
+                {"id": "step", "label": "Step by Step"},
+                {"id": "exam", "label": "Exam Style"},
+                {"id": "deep", "label": "Deeper Way"},
+            ],
+            "material": material_doc["material"],
+            "item": material_doc["item"],
+            "extraction_notice": material_doc["extraction_notice"],
+        }
+    outline = generate_document_workspace_outline(
+        safe_topic(material_doc["material"].get("title") or material_doc["item_title"] or "Study document"),
+        level,
+        material_doc["content"],
+    )
+    return {
+        "mode": "study",
+        "classification": classification,
+        "course": outline,
+        "material": material_doc["material"],
+        "item": material_doc["item"],
+        "extraction_notice": material_doc["extraction_notice"],
+    }
+
+
+@app.post("/classroom/materials/lesson")
+def classroom_material_lesson(request: ClassroomMaterialLessonRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
+    level = request.level if request.level in difficulty_guide else "Intermediate"
+    material_doc = load_classroom_material_document(
+        user["id"],
+        safe_topic(request.course_id),
+        safe_topic(request.item_id),
+        safe_topic(request.material_id),
+        request.item_kind or "coursework",
+    )
+    lesson = generate_document_lesson_text(
+        safe_topic(request.course_title),
+        safe_topic(request.module),
+        level,
+        material_doc["content"],
+    )
+    return {
+        "lesson": lesson,
+        "extraction_notice": material_doc["extraction_notice"],
+    }
+
+
+@app.post("/classroom/materials/solve")
+def classroom_material_solve(request: ClassroomMaterialSolveRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
+    level = request.level if request.level in difficulty_guide else "Intermediate"
+    material_doc = load_classroom_material_document(
+        user["id"],
+        safe_topic(request.course_id),
+        safe_topic(request.item_id),
+        safe_topic(request.material_id),
+        request.item_kind or "coursework",
+    )
+    solution = generate_assignment_solution_text(
+        safe_topic(material_doc["material"].get("title") or material_doc["item_title"] or "Assignment"),
+        level,
+        material_doc["content"],
+        safe_topic(request.style or "human").lower(),
+    )
+    return {
+        "solution": solution,
+        "style": safe_topic(request.style or "human").lower(),
+        "extraction_notice": material_doc["extraction_notice"],
+        "title": safe_topic(material_doc["material"].get("title") or material_doc["item_title"] or "Assignment"),
     }
 
 

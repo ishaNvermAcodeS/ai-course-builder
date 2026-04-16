@@ -185,6 +185,21 @@ async function analyzeClassroomMaterial(payload) {
   return res.data;
 }
 
+async function loadClassroomMaterialWorkspace(payload) {
+  const res = await axios.post(`${API_BASE}/classroom/materials/workspace`, payload);
+  return res.data;
+}
+
+async function loadClassroomMaterialLesson(payload) {
+  const res = await axios.post(`${API_BASE}/classroom/materials/lesson`, payload);
+  return res.data;
+}
+
+async function solveClassroomMaterial(payload) {
+  const res = await axios.post(`${API_BASE}/classroom/materials/solve`, payload);
+  return res.data;
+}
+
 async function runExamMode(payload) {
   const res = await axios.post(`${API_BASE}/exam-mode`, payload);
   return res.data;
@@ -1894,6 +1909,94 @@ function ClassroomSnapshotCard({ classroomData, onConnectClassroom, classroomLoa
   );
 }
 
+const SOLVE_STYLE_LABELS = {
+  human: "Human Way",
+  step: "Step by Step",
+  exam: "Exam Style",
+  deep: "Deeper Way",
+};
+
+function buildClassroomMaterialWorkspaceUrl({ item, material, itemKind = "coursework", mode = "study" }) {
+  const params = new URLSearchParams({
+    workspace: "classroom-material",
+    mode,
+    course_id: item?.course_id || "",
+    item_id: item?.id || "",
+    material_id: material?.material_id || material?.id || "",
+    item_kind: itemKind,
+  });
+  return `${window.location.pathname}?${params.toString()}`;
+}
+
+function openClassroomMaterialWorkspace(args) {
+  const nextUrl = buildClassroomMaterialWorkspaceUrl(args);
+  window.open(nextUrl, "_blank", "noopener,noreferrer");
+}
+
+function getClassroomWorkspaceParams() {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("workspace") !== "classroom-material") return null;
+  return {
+    mode: params.get("mode") || "study",
+    course_id: params.get("course_id") || "",
+    item_id: params.get("item_id") || "",
+    material_id: params.get("material_id") || "",
+    item_kind: params.get("item_kind") || "coursework",
+  };
+}
+
+function ClassroomSolveWorkspace({ title, style, setStyle, styleOptions, loading, solution, extractionNotice, onGenerate, onDownload, onGoHome }) {
+  const { displayed, done } = useTypewriter(solution || "", 6, !loading);
+  return (
+    <div className="course-page solve-page">
+      <div className="course-header">
+        <div className="course-kicker">Assignment Workspace</div>
+        <h2 className="course-main-title">{title}</h2>
+        <div className="course-stats">
+          <span className="course-stat-item">Classroom File</span>
+          <span className="course-stat-item">AI Solving Modes</span>
+          <span className="course-stat-item">Download Ready</span>
+        </div>
+        <div className="course-header-actions">
+          <button className="add-profile-btn" onClick={onGoHome}>← Back Home</button>
+          <button className="course-dl-btn" onClick={onDownload} disabled={!solution || loading}>📥 Download Solution</button>
+        </div>
+      </div>
+
+      <div className="solve-toolbar">
+        {styleOptions.map((option) => (
+          <button
+            key={option.id}
+            className={`solve-style-btn ${style === option.id ? "solve-style-btn-active" : ""}`}
+            onClick={() => setStyle(option.id)}
+            disabled={loading}
+          >
+            {option.label || SOLVE_STYLE_LABELS[option.id] || option.id}
+          </button>
+        ))}
+        <button className="cw-study-btn solve-generate-btn" onClick={onGenerate} disabled={loading}>
+          {loading ? "Solving…" : `Solve It · ${SOLVE_STYLE_LABELS[style] || style}`}
+        </button>
+      </div>
+
+      {extractionNotice && <div className="hero-error">{extractionNotice}</div>}
+
+      <div className="inline-lesson solve-lesson-wrap">
+        <div className="il-main">
+          <div className="il-eyebrow">Solved Output</div>
+          <div className="il-lesson-card">
+            <div className="il-body">
+              <LessonText text={displayed || (loading ? "Preparing the solution..." : "Choose a solving mode to begin.")} />
+              {loading && !done && <span className="cursor-blink">▌</span>}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function getMaterialPrimaryAction(item, material) {
   const combined = `${item?.title || ""} ${item?.description || ""} ${material?.title || ""} ${material?.mime_type || ""}`.toLowerCase();
   const solveSignals = /(assignment|worksheet|homework|problem set|question paper|lab|quiz|test|exam|set[-\s]?\d+|exercise)/i;
@@ -1903,7 +2006,7 @@ function getMaterialPrimaryAction(item, material) {
   return itemKind === "coursework" ? "assignment" : "study";
 }
 
-function ClassroomMaterialList({ item, itemKind, onAnalyzeMaterial, materialLoadingKey }) {
+function ClassroomMaterialList({ item, itemKind, onOpenWorkspace }) {
   const materials = item?.materials || [];
   if (!materials.length) return null;
 
@@ -1911,8 +2014,6 @@ function ClassroomMaterialList({ item, itemKind, onAnalyzeMaterial, materialLoad
     <div className="cw-material-list">
       <div className="cw-material-label">Files & Materials</div>
       {materials.map((material, index) => {
-        const analyzeKey = `${itemKind}-${item.id}-${material.material_id || material.id}`;
-        const isLoading = materialLoadingKey === analyzeKey;
         const primaryAction = getMaterialPrimaryAction(item, material);
         return (
           <div key={`${material.id || material.material_id || material.url || index}`} className="cw-material-card">
@@ -1925,10 +2026,9 @@ function ClassroomMaterialList({ item, itemKind, onAnalyzeMaterial, materialLoad
               {material.analyzable && (
                 <button
                   className={`cw-material-btn ${primaryAction === "assignment" ? "cw-material-btn-solve" : ""}`}
-                  onClick={() => onAnalyzeMaterial(item, material, itemKind, primaryAction)}
-                  disabled={isLoading}
+                  onClick={() => onOpenWorkspace(item, material, itemKind, primaryAction)}
                 >
-                  {isLoading ? "Analyzing…" : (primaryAction === "assignment" ? "Solve" : "Study File")}
+                  {primaryAction === "assignment" ? "Solve It" : "Study File"}
                 </button>
               )}
             </div>
@@ -1939,7 +2039,7 @@ function ClassroomMaterialList({ item, itemKind, onAnalyzeMaterial, materialLoad
   );
 }
 
-function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId, coursework, announcements, allAnnouncements, insights, materialAnalysis, materialLoadingKey, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onAnalyzeMaterial, onConnectClassroom }) {
+function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId, coursework, announcements, allAnnouncements, insights, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onOpenMaterialWorkspace, onConnectClassroom }) {
   const selectedCourse = classroomCourses.find((course) => course.id === selectedCourseId) || null;
   const notifications = classroomData?.notifications || { urgent: [], upcoming: [], overdue: [] };
   const notificationsFeed = [
@@ -1997,9 +2097,6 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
             <div className="cw-title">{selectedCourse?.name || "Choose a classroom course"}</div>
             <div className="cw-subtitle">{selectedCourse ? (selectedCourse.section || "No section") : "Select a course from the sidebar to load coursework and announcements."}</div>
           </div>
-          <button className="cw-study-btn" onClick={() => onAnalyze(selectedCourseId)} disabled={!classroomData?.connected || analyzing}>
-            {analyzing ? "Analyzing…" : "Study with AI"}
-          </button>
         </div>
 
         {error && <div className="hero-error">{error}</div>}
@@ -2014,7 +2111,7 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
                 <div key={item.id} className="cw-assignment-card">
                   <div className="cw-assignment-title">{item.text || "Announcement"}</div>
                   <div className="cw-assignment-meta">{item.update_time ? new Date(item.update_time).toLocaleString() : "No timestamp"}</div>
-                  <ClassroomMaterialList item={item} itemKind="announcement" onAnalyzeMaterial={onAnalyzeMaterial} materialLoadingKey={materialLoadingKey} />
+                  <ClassroomMaterialList item={item} itemKind="announcement" onOpenWorkspace={onOpenMaterialWorkspace} />
                 </div>
               ))
             ) : (
@@ -2032,7 +2129,7 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
                   <div className="cw-assignment-title">{item.title}</div>
                   <div className="cw-assignment-meta">{item.due_at ? new Date(item.due_at).toLocaleString() : "No due date"}</div>
                   {item.description && <div className="cw-assignment-desc">{item.description}</div>}
-                  <ClassroomMaterialList item={item} itemKind="coursework" onAnalyzeMaterial={onAnalyzeMaterial} materialLoadingKey={materialLoadingKey} />
+                  <ClassroomMaterialList item={item} itemKind="coursework" onOpenWorkspace={onOpenMaterialWorkspace} />
                 </div>
               ))
             ) : (
@@ -2042,8 +2139,11 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
 
           <div className="cw-card">
             <div className="cw-card-label">AI Insights</div>
-            {insights || materialAnalysis?.analysis ? (
+            {insights ? (
               <div className="cw-insights">
+                <button className="cw-study-btn cw-insights-btn" onClick={() => onAnalyze(selectedCourseId)} disabled={!classroomData?.connected || analyzing}>
+                  {analyzing ? "Loading…" : "Get Insights"}
+                </button>
                 {insights?.summary && <div className="cw-summary">{insights.summary}</div>}
                 {!!insights?.study_plan?.length && (
                   <div className="cw-block">
@@ -2065,51 +2165,14 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
                     </div>
                   </div>
                 )}
-                {materialAnalysis?.analysis && (
-                  <div className="cw-block cw-material-analysis">
-                    <div className="cw-mini-label">Document Analysis</div>
-                    <div className="cw-summary">{materialAnalysis.analysis.summary}</div>
-                    {materialAnalysis.analysis.extraction_notice && <div className="cw-analysis-note">{materialAnalysis.analysis.extraction_notice}</div>}
-                    {!!materialAnalysis.analysis.key_points?.length && materialAnalysis.analysis.key_points.map((point, index) => (
-                      <div key={`${point}-${index}`} className="cw-line">{point}</div>
-                    ))}
-                    {!!materialAnalysis.analysis.study_plan?.length && (
-                      <div className="cw-sub-block">
-                        {materialAnalysis.analysis.study_plan.map((step, index) => <div key={`${step}-${index}`} className="cw-line">{index + 1}. {step}</div>)}
-                      </div>
-                    )}
-                    {materialAnalysis.analysis.assignment_solution && (
-                      <div className="cw-solution-card">
-                        <div className="cw-mini-label">Worked Solution</div>
-                        <LessonText text={materialAnalysis.analysis.assignment_solution} />
-                      </div>
-                    )}
-                    {!!materialAnalysis.youtube_resources?.length && (
-                      <div className="cw-resource-list">
-                        {materialAnalysis.youtube_resources.slice(0, 3).map((video, index) => (
-                          <a key={`${video.url}-${index}`} className="cw-resource-card" href={video.url} target="_blank" rel="noreferrer">
-                            <div className="cw-resource-title">{video.title}</div>
-                            <div className="cw-resource-meta">{video.channel || "YouTube"}</div>
-                          </a>
-                        ))}
-                      </div>
-                    )}
-                    {!!materialAnalysis.web_resources?.length && (
-                      <div className="cw-resource-list">
-                        {materialAnalysis.web_resources.slice(0, 4).map((resource, index) => (
-                          <a key={`${resource.url}-${index}`} className="cw-resource-card" href={resource.url} target="_blank" rel="noreferrer">
-                            <div className="cw-resource-title">{resource.title}</div>
-                            <div className="cw-resource-meta">{resource.source || "Web"}</div>
-                          </a>
-                        ))}
-                      </div>
-                    )}
-                    {!materialAnalysis.web_resources?.length && materialAnalysis.web_resources_error && <div className="cw-analysis-note">{materialAnalysis.web_resources_error}</div>}
-                  </div>
-                )}
               </div>
             ) : (
-              <div className="rec-empty">Use “Study with AI” to turn your classroom data into a study plan, reminders, and key topics. Attached files can also be analyzed here.</div>
+              <div className="cw-insights">
+                <button className="cw-study-btn cw-insights-btn" onClick={() => onAnalyze(selectedCourseId)} disabled={!classroomData?.connected || analyzing}>
+                  {analyzing ? "Loading…" : "Get Insights"}
+                </button>
+                <div className="rec-empty">Get a crisp summary of this course, upcoming deadlines, and smart preparation strategy from the selected classroom stream.</div>
+              </div>
             )}
           </div>
         </div>
@@ -2139,7 +2202,7 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
   );
 }
 
-function ClassroomSidePanel({ open, onClose, classroomData, classroomCourses, selectedCourseId, coursework, announcements, allAnnouncements, insights, materialAnalysis, materialLoadingKey, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onAnalyzeMaterial, onConnectClassroom }) {
+function ClassroomSidePanel({ open, onClose, classroomData, classroomCourses, selectedCourseId, coursework, announcements, allAnnouncements, insights, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onOpenMaterialWorkspace, onConnectClassroom }) {
   useScrollLock();
 
   useEffect(() => {
@@ -2171,15 +2234,13 @@ function ClassroomSidePanel({ open, onClose, classroomData, classroomCourses, se
             announcements={announcements}
             allAnnouncements={allAnnouncements}
             insights={insights}
-            materialAnalysis={materialAnalysis}
-            materialLoadingKey={materialLoadingKey}
             loadingCourses={loadingCourses}
             loadingDetails={loadingDetails}
             analyzing={analyzing}
             error={error}
             onSelectCourse={onSelectCourse}
             onAnalyze={onAnalyze}
-            onAnalyzeMaterial={onAnalyzeMaterial}
+            onOpenMaterialWorkspace={onOpenMaterialWorkspace}
             onConnectClassroom={onConnectClassroom}
           />
         </div>
@@ -2394,8 +2455,6 @@ export default function Home() {
   const [classroomAnnouncements, setClassroomAnnouncements] = useState([]);
   const [classroomAllAnnouncements, setClassroomAllAnnouncements] = useState([]);
   const [classroomInsights, setClassroomInsights] = useState(null);
-  const [classroomMaterialAnalysis, setClassroomMaterialAnalysis] = useState(null);
-  const [classroomMaterialLoadingKey, setClassroomMaterialLoadingKey] = useState("");
   const [classroomLoading, setClassroomLoading] = useState(false);
   const [classroomWorkspaceLoading, setClassroomWorkspaceLoading] = useState(false);
   const [classroomDetailsLoading, setClassroomDetailsLoading] = useState(false);
@@ -2408,6 +2467,11 @@ export default function Home() {
   const [showExamMode, setShowExamMode] = useState(false);
   const [shortTaskToast, setShortTaskToast] = useState(null);
   const [darkMode, setDarkMode] = useState(false);
+  const [documentWorkspaceMeta, setDocumentWorkspaceMeta] = useState(null);
+  const [solveWorkspaceMeta, setSolveWorkspaceMeta] = useState(null);
+  const [solveStyle, setSolveStyle] = useState("human");
+  const [solveLoading, setSolveLoading] = useState(false);
+  const [solveResult, setSolveResult] = useState("");
 
   // Dark mode: default is false (light/cyan theme)
   const lessonCache = useRef({});
@@ -2454,19 +2518,37 @@ export default function Home() {
   const ensureLessonLoaded = useCallback(async (topicItem, courseTopicArg = activeTopic, courseLevelArg = activeLevel) => {
     if (!topicItem) return;
     if (lessonCache.current[topicItem]) return;
+    const lessonPromise = documentWorkspaceMeta
+      ? loadClassroomMaterialLesson({
+          course_id: documentWorkspaceMeta.course_id,
+          item_id: documentWorkspaceMeta.item_id,
+          material_id: documentWorkspaceMeta.material_id,
+          item_kind: documentWorkspaceMeta.item_kind,
+          level: courseLevelArg,
+          course_title: courseTopicArg,
+          module: topicItem,
+        })
+      : axios.post(`${API_BASE}/generate-lesson`, { topic: courseTopicArg, module: topicItem, level: courseLevelArg, goal });
+    const suggestionPromise = documentWorkspaceMeta
+      ? axios.post(`${API_BASE}/generate-study-suggestion`, {
+          course_topic: courseTopicArg,
+          module_name: topicItem,
+          level: courseLevelArg,
+        })
+      : axios.post(`${API_BASE}/generate-study-suggestion`, {
+          course_topic: courseTopicArg,
+          module_name: topicItem,
+          level: courseLevelArg,
+        });
     const [lessonRes, videoRes, webRes, suggestionRes] = await Promise.allSettled([
-      axios.post(`${API_BASE}/generate-lesson`, { topic: courseTopicArg, module: topicItem, level: courseLevelArg, goal }),
+      lessonPromise,
       axios.get(`${API_BASE}/youtube-resources`, { params: { topic: topicItem, level: courseLevelArg } }),
       axios.get(`${API_BASE}/web-resources`, { params: { topic: topicItem, level: courseLevelArg } }),
-      axios.post(`${API_BASE}/generate-study-suggestion`, {
-        course_topic: courseTopicArg,
-        module_name: topicItem,
-        level: courseLevelArg,
-      }),
+      suggestionPromise,
     ]);
 
     const lessonFailed = lessonRes.status === "rejected";
-    const lessonText = lessonRes.status === "fulfilled" ? lessonRes.value.data.lesson : "";
+    const lessonText = lessonRes.status === "fulfilled" ? ((lessonRes.value.data?.lesson) || lessonRes.value.lesson || "") : "";
     const lessonError = lessonFailed ? getErrorMessage(lessonRes.reason, "Could not generate this lesson right now. Please try opening it again.") : "";
 
     lessonCache.current[topicItem] = {
@@ -2478,7 +2560,7 @@ export default function Home() {
       suggestion: suggestionRes.status === "fulfilled" ? (suggestionRes.value.data.suggestion || "") : "",
       quiz: lessonCache.current[topicItem]?.quiz || null,
     };
-  }, [activeTopic, activeLevel, goal]);
+  }, [activeTopic, activeLevel, goal, documentWorkspaceMeta]);
 
   const openTopicByName = useCallback(async (topicItem) => {
     if (!course || !topicItem) return;
@@ -2496,8 +2578,10 @@ export default function Home() {
 
   useEffect(() => {
     try {
+      const workspaceParams = getClassroomWorkspaceParams();
       const savedTheme = window.localStorage.getItem(THEME_KEY);
       if (savedTheme === "dark") setDarkMode(true);
+      if (workspaceParams) return;
       const rawState = window.localStorage.getItem(APP_STATE_KEY);
       if (rawState) {
         const saved = JSON.parse(rawState);
@@ -2524,6 +2608,60 @@ export default function Home() {
     };
     restoreSession();
   }, []);
+
+  useEffect(() => {
+    if (authLoading || !currentUser) return;
+    const workspaceParams = getClassroomWorkspaceParams();
+    if (!workspaceParams?.course_id || !workspaceParams?.item_id || !workspaceParams?.material_id) return;
+    let cancelled = false;
+    const loadWorkspace = async () => {
+      setLoading(true);
+      setGenerateError("");
+      try {
+        const payload = await loadClassroomMaterialWorkspace({
+          ...workspaceParams,
+          level,
+        });
+        if (cancelled) return;
+        if (payload.mode === "assignment") {
+          setCourse(null);
+          setViewState("solve");
+          setSolveWorkspaceMeta({
+            ...workspaceParams,
+            ...payload,
+          });
+          setSolveStyle(payload.style_options?.[0]?.id || "human");
+          setSolveResult("");
+          setDocumentWorkspaceMeta(null);
+        } else {
+          const courseData = payload.course;
+          setTopic(payload.course?.course_title || "");
+          setActiveTopic(payload.course?.course_title || "");
+          setActiveLevel(level);
+          setCourse(courseData);
+          setViewState("course");
+          setRecommendations(null);
+          setExpandedTopics(new Set());
+          lessonCache.current = {};
+          typedTopics.current = new Set();
+          setDocumentWorkspaceMeta({
+            ...workspaceParams,
+            title: courseData.course_title,
+            extraction_notice: payload.extraction_notice || "",
+          });
+          setSolveWorkspaceMeta(null);
+          window.history.replaceState({ view: "course", workspace: true, courseData }, "", window.location.href);
+        }
+      } catch (e) {
+        console.error(e);
+        if (!cancelled) setGenerateError(getErrorMessage(e, "Could not open this classroom workspace right now."));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    loadWorkspace();
+    return () => { cancelled = true; };
+  }, [authLoading, currentUser, level]);
 
   const refreshProfileCourses = useCallback(async () => {
     if (!currentUser) {
@@ -2569,8 +2707,6 @@ export default function Home() {
     classroomCourseDetailsCacheRef.current = {};
     classroomAnnouncementFeedCacheRef.current = {};
     setClassroomAllAnnouncements([]);
-    setClassroomMaterialAnalysis(null);
-    setClassroomMaterialLoadingKey("");
   }, [currentUser?.id]);
 
   const rebuildAnnouncementFeed = useCallback(() => {
@@ -2614,7 +2750,6 @@ export default function Home() {
     if (cached) {
       setClassroomCoursework(cached.coursework || []);
       setClassroomAnnouncements(cached.announcements || []);
-      setClassroomMaterialAnalysis(null);
       setClassroomDetailsLoading(false);
       return;
     }
@@ -2639,7 +2774,6 @@ export default function Home() {
       rebuildAnnouncementFeed();
       setClassroomCoursework(nextDetails.coursework);
       setClassroomAnnouncements(nextDetails.announcements);
-      setClassroomMaterialAnalysis(null);
     } catch (e) {
       if (requestId !== classroomDetailsRequestRef.current) return;
       console.error(e);
@@ -2690,30 +2824,9 @@ export default function Home() {
     }
   }, [currentUser, classroomData?.connected, classroomSelectedCourseId]);
 
-  const handleAnalyzeClassroomMaterial = useCallback(async (item, material, itemKind = "coursework", analysisType = "study") => {
-    const effectiveCourseId = item?.course_id || classroomSelectedCourseId;
-    if (!currentUser || !classroomData?.connected || !effectiveCourseId) return;
-    const nextKey = `${itemKind}-${item.id}-${material.material_id || material.id}`;
-    setClassroomMaterialLoadingKey(nextKey);
-    setClassroomError("");
-    try {
-      const data = await analyzeClassroomMaterial({
-        course_id: effectiveCourseId,
-        item_id: item.id,
-        material_id: material.material_id || material.id,
-        item_kind: itemKind,
-        analysis_type: analysisType,
-        level,
-      });
-      setClassroomMaterialAnalysis(data);
-      setClassroomInsights((prev) => prev || null);
-    } catch (e) {
-      console.error(e);
-      setClassroomError(getErrorMessage(e, "Could not analyze this classroom file right now."));
-    } finally {
-      setClassroomMaterialLoadingKey("");
-    }
-  }, [currentUser, classroomData?.connected, classroomSelectedCourseId, level]);
+  const handleOpenMaterialWorkspace = useCallback((item, material, itemKind = "coursework", analysisType = "study") => {
+    openClassroomMaterialWorkspace({ item, material, itemKind, mode: analysisType });
+  }, []);
 
   const handleOpenClassroomPanel = useCallback(() => {
     if (!currentUser) {
@@ -2816,6 +2929,7 @@ export default function Home() {
 
   useEffect(() => {
     try {
+      if (documentWorkspaceMeta || solveWorkspaceMeta || getClassroomWorkspaceParams()) return;
       window.localStorage.setItem(THEME_KEY, darkMode ? "dark" : "light");
       window.localStorage.setItem(APP_STATE_KEY, JSON.stringify({
         view: course ? "course" : "home",
@@ -2829,7 +2943,7 @@ export default function Home() {
         recommendations,
       }));
     } catch {}
-  }, [APP_STATE_KEY, THEME_KEY, darkMode, topic, level, goal, activeTopic, activeLevel, useClassroomData, course, recommendations]);
+  }, [APP_STATE_KEY, THEME_KEY, darkMode, topic, level, goal, activeTopic, activeLevel, useClassroomData, course, recommendations, documentWorkspaceMeta, solveWorkspaceMeta]);
 
   useEffect(() => {
     if (!course || !activeTopic) return;
@@ -2860,6 +2974,7 @@ export default function Home() {
         setCourse(null); setViewState("home"); setQuizModal(null); setTutorOpen(false);
         setTutorContext(null); setTutorDraft(""); setTutorAutoSend("");
         setRecommendations(null); setRevisionAlert(null);
+        setDocumentWorkspaceMeta(null); setSolveWorkspaceMeta(null); setSolveResult("");
         setExpandedTopics(new Set());
         lessonCache.current = {}; typedTopics.current = new Set();
       } else if (state.view === "course" && state.courseData) {
@@ -2867,6 +2982,7 @@ export default function Home() {
         setUseClassroomData(!!state.useClassroomData);
         setActiveTopic(state.activeTopic || state.topic); setActiveLevel(state.activeLevel || state.level);
         setCourse(state.courseData); setViewState("course"); setQuizModal(null);
+        setSolveWorkspaceMeta(null); setSolveResult("");
         setRecommendations(state.recommendations || state.courseData.recommendations || null);
         setExpandedTopics(new Set());
         lessonCache.current = {}; typedTopics.current = new Set();
@@ -2919,6 +3035,7 @@ export default function Home() {
     setTutorContext(null); setTutorDraft(""); setTutorAutoSend("");
     setRevisionAlert(null); setShortTaskToast(null);
     setGenerateError("");
+    setDocumentWorkspaceMeta(null); setSolveWorkspaceMeta(null); setSolveResult("");
     lessonCache.current = {}; typedTopics.current = new Set();
     try {
       const res = await axios.post(`${API_BASE}/generate-course`, { topic, level, goal, use_classroom_data: useClassroomData });
@@ -2943,6 +3060,33 @@ export default function Home() {
     finally { setLoading(false); }
   };
 
+  const generateSolveWorkspace = useCallback(async (nextStyle = solveStyle) => {
+    if (!solveWorkspaceMeta) return;
+    setSolveLoading(true);
+    setGenerateError("");
+    try {
+      const data = await solveClassroomMaterial({
+        course_id: solveWorkspaceMeta.course_id,
+        item_id: solveWorkspaceMeta.item_id,
+        material_id: solveWorkspaceMeta.material_id,
+        item_kind: solveWorkspaceMeta.item_kind,
+        level,
+        style: nextStyle,
+      });
+      setSolveResult(data.solution || "");
+    } catch (e) {
+      console.error(e);
+      setGenerateError(getErrorMessage(e, "Could not solve this classroom file right now."));
+    } finally {
+      setSolveLoading(false);
+    }
+  }, [solveWorkspaceMeta, solveStyle, level]);
+
+  useEffect(() => {
+    if (!solveWorkspaceMeta || solveResult) return;
+    generateSolveWorkspace(solveStyle);
+  }, [solveWorkspaceMeta, solveResult, solveStyle, generateSolveWorkspace]);
+
   const generateQuizFor = async (moduleTitle) => {
     setQuizGenerating(true);
     try {
@@ -2964,6 +3108,7 @@ export default function Home() {
     setTutorMessages([]); setExpandedTopics(new Set());
     setTutorContext(null); setTutorDraft(""); setTutorAutoSend("");
     setRevisionAlert(null);
+    setDocumentWorkspaceMeta(null); setSolveWorkspaceMeta(null); setSolveResult("");
     lessonCache.current = {}; typedTopics.current = new Set();
     try {
       const res = await axios.post(`${API_BASE}/generate-course`, { topic: savedCourse.topic, level: savedCourse.level, goal, use_classroom_data: useClassroomData });
@@ -2988,6 +3133,9 @@ export default function Home() {
     setRecommendations(null);
     setRevisionAlert(null);
     setExpandedTopics(new Set());
+    setDocumentWorkspaceMeta(null);
+    setSolveWorkspaceMeta(null);
+    setSolveResult("");
     lessonCache.current = {};
     typedTopics.current = new Set();
     window.history.pushState({ view: "home" }, "", window.location.pathname);
@@ -3030,12 +3178,22 @@ export default function Home() {
 
           let lessonText = lessonCache.current[topicItem]?.lesson;
           if (!lessonText) {
-            const lessonRes = await axios.post(`${API_BASE}/generate-lesson`, {
-              topic: activeTopic,
-              module: topicItem,
-              level: activeLevel,
-            });
-            lessonText = lessonRes.data.lesson || "";
+            const lessonRes = documentWorkspaceMeta
+              ? await loadClassroomMaterialLesson({
+                  course_id: documentWorkspaceMeta.course_id,
+                  item_id: documentWorkspaceMeta.item_id,
+                  material_id: documentWorkspaceMeta.material_id,
+                  item_kind: documentWorkspaceMeta.item_kind,
+                  level: activeLevel,
+                  course_title: activeTopic,
+                  module: topicItem,
+                })
+              : await axios.post(`${API_BASE}/generate-lesson`, {
+                  topic: activeTopic,
+                  module: topicItem,
+                  level: activeLevel,
+                });
+            lessonText = lessonRes.data?.lesson || lessonRes.lesson || "";
             lessonCache.current[topicItem] = {
               ...(lessonCache.current[topicItem] || { videos: [], webResources: [], suggestion: "", quiz: null }),
               lesson: lessonText,
@@ -3058,8 +3216,9 @@ export default function Home() {
 
   const totalTopics = getTotalTopics(course);
   const currentQuizText = quizModal ? lessonCache.current[quizModal.moduleTitle]?.quiz : null;
-  const showHome = !course && !loading && !authLoading;
-  const showCourse = course && !loading && !authLoading;
+  const showHome = !course && viewState !== "solve" && !loading && !authLoading;
+  const showCourse = course && viewState === "course" && !loading && !authLoading;
+  const showSolve = viewState === "solve" && !!solveWorkspaceMeta && !loading && !authLoading;
 
   const closeSelectionUi = useCallback(() => {
     setSelectionBubble(null);
@@ -3771,6 +3930,7 @@ export default function Home() {
           flex-shrink:0;
         }
         .cw-study-btn:disabled { opacity:.55; cursor:not-allowed; }
+        .cw-insights-btn { align-self:flex-start; }
         .cw-grid {
           display:grid;
           grid-template-columns:minmax(0, 1fr) minmax(240px, .85fr);
@@ -3889,6 +4049,30 @@ export default function Home() {
         }
         .cw-resource-title { font-weight:700; line-height:1.45; }
         .cw-resource-meta { color:var(--text3); font-size:.78rem; }
+        .solve-page { max-width:980px; }
+        .solve-toolbar {
+          display:flex;
+          flex-wrap:wrap;
+          gap:10px;
+          margin-bottom:16px;
+          align-items:center;
+        }
+        .solve-style-btn {
+          border:1px solid var(--border);
+          border-radius:999px;
+          padding:10px 14px;
+          background:var(--surface);
+          color:var(--text);
+          font-weight:700;
+          cursor:pointer;
+        }
+        .solve-style-btn-active {
+          background:var(--accent-dim);
+          border-color:var(--accent-mid);
+          color:var(--accent);
+        }
+        .solve-generate-btn { margin-left:auto; }
+        .solve-lesson-wrap { margin-top:8px; }
         .cw-topic-chips { display:flex; flex-wrap:wrap; gap:8px; }
         .cw-topic-chip {
           display:inline-flex;
@@ -5350,7 +5534,7 @@ export default function Home() {
           currentUser={currentUser}
           courses={profileCourses}
           onCoursesRefresh={refreshProfileCourses}
-          onSignOut={async () => { await clearSession(); setCurrentUser(null); setProfileCourses([]); setProfileOpen(false); setRecommendations(null); setClassroomData(null); setClassroomCourses([]); setClassroomSelectedCourseId(""); setClassroomCoursework([]); setClassroomAnnouncements([]); setClassroomInsights(null); setClassroomMaterialAnalysis(null); setClassroomMaterialLoadingKey(""); setUseClassroomData(false); setClassroomInfoOpen(false); }}
+          onSignOut={async () => { await clearSession(); setCurrentUser(null); setProfileCourses([]); setProfileOpen(false); setRecommendations(null); setClassroomData(null); setClassroomCourses([]); setClassroomSelectedCourseId(""); setClassroomCoursework([]); setClassroomAnnouncements([]); setClassroomInsights(null); setUseClassroomData(false); setClassroomInfoOpen(false); setDocumentWorkspaceMeta(null); setSolveWorkspaceMeta(null); setSolveResult(""); }}
         />
       )}
 
@@ -5383,15 +5567,13 @@ export default function Home() {
         announcements={classroomAnnouncements}
         allAnnouncements={classroomAllAnnouncements}
         insights={classroomInsights}
-        materialAnalysis={classroomMaterialAnalysis}
-        materialLoadingKey={classroomMaterialLoadingKey}
         loadingCourses={classroomWorkspaceLoading}
         loadingDetails={classroomDetailsLoading}
         analyzing={classroomAnalyzeLoading}
         error={classroomError}
         onSelectCourse={loadCourseDetails}
         onAnalyze={handleAnalyzeClassroom}
-        onAnalyzeMaterial={handleAnalyzeClassroomMaterial}
+        onOpenMaterialWorkspace={handleOpenMaterialWorkspace}
         onConnectClassroom={handleConnectClassroom}
       />
 
@@ -5533,6 +5715,40 @@ export default function Home() {
               autoSendText={tutorAutoSend}
             />
           )}
+        </>
+      )}
+
+      {showSolve && (
+        <>
+          <CompactBar
+            topic={topic} setTopic={setTopic} level={level} setLevel={setLevel} goal={goal} setGoal={setGoal}
+            useClassroomData={useClassroomData} setUseClassroomData={setUseClassroomData}
+            classroomConnected={!!classroomData?.connected} onConnectClassroom={handleConnectClassroom} classroomLoading={classroomLoading}
+            onOpenClassroomPanel={handleOpenClassroomPanel}
+            onGenerate={generateCourse} loading={loading}
+            onProfileOpen={() => currentUser ? setProfileOpen(true) : setShowAuth(true)}
+            profileCount={profileCourses.length}
+            showClassroomStatus={showClassroomStatus}
+            darkMode={darkMode}
+            onToggleTheme={() => setDarkMode(prev => !prev)}
+            onGoHome={handleGoHome}
+            onShowNotifications={() => setClassroomToastTick((prev) => prev + 1)}
+            disclaimerOpen={classroomInfoOpen}
+            onToggleDisclaimer={() => setClassroomInfoOpen((prev) => !prev)}
+            classroomIsMock={!!classroomData?.is_mock}
+          />
+          <ClassroomSolveWorkspace
+            title={solveWorkspaceMeta?.title || "Assignment Workspace"}
+            style={solveStyle}
+            setStyle={setSolveStyle}
+            styleOptions={solveWorkspaceMeta?.style_options || []}
+            loading={solveLoading}
+            solution={solveResult}
+            extractionNotice={solveWorkspaceMeta?.extraction_notice || ""}
+            onGenerate={() => generateSolveWorkspace(solveStyle)}
+            onDownload={() => downloadContentAsPDF(`${solveWorkspaceMeta?.title || "Assignment"} — ${SOLVE_STYLE_LABELS[solveStyle] || solveStyle}`, solveResult)}
+            onGoHome={handleGoHome}
+          />
         </>
       )}
 
