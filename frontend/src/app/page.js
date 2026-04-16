@@ -180,6 +180,11 @@ async function analyzeClassroom(courseId = "") {
   return res.data;
 }
 
+async function analyzeClassroomMaterial(payload) {
+  const res = await axios.post(`${API_BASE}/classroom/materials/analyze`, payload);
+  return res.data;
+}
+
 async function runExamMode(payload) {
   const res = await axios.post(`${API_BASE}/exam-mode`, payload);
   return res.data;
@@ -1889,7 +1894,46 @@ function ClassroomSnapshotCard({ classroomData, onConnectClassroom, classroomLoa
   );
 }
 
-function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId, coursework, announcements, allAnnouncements, insights, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onConnectClassroom }) {
+function ClassroomMaterialList({ item, itemKind, onAnalyzeMaterial, materialLoadingKey }) {
+  const materials = item?.materials || [];
+  if (!materials.length) return null;
+  const assignmentLike = /assignment|worksheet|homework|problem set|quiz|lab/i.test(`${item?.title || ""} ${item?.description || ""}`);
+
+  return (
+    <div className="cw-material-list">
+      <div className="cw-material-label">Files & Materials</div>
+      {materials.map((material, index) => {
+        const analyzeKey = `${itemKind}-${item.id}-${material.material_id || material.id}`;
+        const isLoading = materialLoadingKey === analyzeKey;
+        return (
+          <div key={`${material.id || material.material_id || material.url || index}`} className="cw-material-card">
+            <div className="cw-material-main">
+              <div className="cw-material-title">{material.title}</div>
+              <div className="cw-material-meta">{(material.kind || "material").replace("_", " ")}</div>
+            </div>
+            <div className="cw-material-actions">
+              {material.url && <a className="cw-material-link" href={material.url} target="_blank" rel="noreferrer">Open</a>}
+              {material.analyzable && (
+                <>
+                  <button className="cw-material-btn" onClick={() => onAnalyzeMaterial(item, material, itemKind, "study")} disabled={isLoading}>
+                    {isLoading ? "Analyzing…" : "Study File"}
+                  </button>
+                  {assignmentLike && (
+                    <button className="cw-material-btn cw-material-btn-solve" onClick={() => onAnalyzeMaterial(item, material, itemKind, "assignment")} disabled={isLoading}>
+                      {isLoading ? "Analyzing…" : "Solve"}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId, coursework, announcements, allAnnouncements, insights, materialAnalysis, materialLoadingKey, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onAnalyzeMaterial, onConnectClassroom }) {
   const selectedCourse = classroomCourses.find((course) => course.id === selectedCourseId) || null;
   const notifications = classroomData?.notifications || { urgent: [], upcoming: [], overdue: [] };
   const notificationsFeed = [
@@ -1960,6 +2004,7 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
                 <div key={item.id} className="cw-assignment-card">
                   <div className="cw-assignment-title">{item.text || "Announcement"}</div>
                   <div className="cw-assignment-meta">{item.update_time ? new Date(item.update_time).toLocaleString() : "No timestamp"}</div>
+                  <ClassroomMaterialList item={item} itemKind="announcement" onAnalyzeMaterial={onAnalyzeMaterial} materialLoadingKey={materialLoadingKey} />
                 </div>
               ))
             ) : (
@@ -1977,6 +2022,7 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
                   <div className="cw-assignment-title">{item.title}</div>
                   <div className="cw-assignment-meta">{item.due_at ? new Date(item.due_at).toLocaleString() : "No due date"}</div>
                   {item.description && <div className="cw-assignment-desc">{item.description}</div>}
+                  <ClassroomMaterialList item={item} itemKind="coursework" onAnalyzeMaterial={onAnalyzeMaterial} materialLoadingKey={materialLoadingKey} />
                 </div>
               ))
             ) : (
@@ -1986,22 +2032,22 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
 
           <div className="cw-card">
             <div className="cw-card-label">AI Insights</div>
-            {insights ? (
+            {insights || materialAnalysis?.analysis ? (
               <div className="cw-insights">
-                {insights.summary && <div className="cw-summary">{insights.summary}</div>}
-                {!!insights.study_plan?.length && (
+                {insights?.summary && <div className="cw-summary">{insights.summary}</div>}
+                {!!insights?.study_plan?.length && (
                   <div className="cw-block">
                     <div className="cw-mini-label">Study Plan</div>
                     {insights.study_plan.map((item, index) => <div key={`${item}-${index}`} className="cw-line">{index + 1}. {item}</div>)}
                   </div>
                 )}
-                {!!insights.reminders?.length && (
+                {!!insights?.reminders?.length && (
                   <div className="cw-block">
                     <div className="cw-mini-label">Reminders</div>
                     {insights.reminders.map((item, index) => <div key={`${item}-${index}`} className="cw-line">{item}</div>)}
                   </div>
                 )}
-                {!!insights.key_topics?.length && (
+                {!!insights?.key_topics?.length && (
                   <div className="cw-block">
                     <div className="cw-mini-label">Key Topics</div>
                     <div className="cw-topic-chips">
@@ -2009,9 +2055,51 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
                     </div>
                   </div>
                 )}
+                {materialAnalysis?.analysis && (
+                  <div className="cw-block cw-material-analysis">
+                    <div className="cw-mini-label">Document Analysis</div>
+                    <div className="cw-summary">{materialAnalysis.analysis.summary}</div>
+                    {materialAnalysis.analysis.extraction_notice && <div className="cw-analysis-note">{materialAnalysis.analysis.extraction_notice}</div>}
+                    {!!materialAnalysis.analysis.key_points?.length && materialAnalysis.analysis.key_points.map((point, index) => (
+                      <div key={`${point}-${index}`} className="cw-line">{point}</div>
+                    ))}
+                    {!!materialAnalysis.analysis.study_plan?.length && (
+                      <div className="cw-sub-block">
+                        {materialAnalysis.analysis.study_plan.map((step, index) => <div key={`${step}-${index}`} className="cw-line">{index + 1}. {step}</div>)}
+                      </div>
+                    )}
+                    {materialAnalysis.analysis.assignment_solution && (
+                      <div className="cw-solution-card">
+                        <div className="cw-mini-label">Worked Solution</div>
+                        <LessonText text={materialAnalysis.analysis.assignment_solution} />
+                      </div>
+                    )}
+                    {!!materialAnalysis.youtube_resources?.length && (
+                      <div className="cw-resource-list">
+                        {materialAnalysis.youtube_resources.slice(0, 3).map((video, index) => (
+                          <a key={`${video.url}-${index}`} className="cw-resource-card" href={video.url} target="_blank" rel="noreferrer">
+                            <div className="cw-resource-title">{video.title}</div>
+                            <div className="cw-resource-meta">{video.channel || "YouTube"}</div>
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                    {!!materialAnalysis.web_resources?.length && (
+                      <div className="cw-resource-list">
+                        {materialAnalysis.web_resources.slice(0, 4).map((resource, index) => (
+                          <a key={`${resource.url}-${index}`} className="cw-resource-card" href={resource.url} target="_blank" rel="noreferrer">
+                            <div className="cw-resource-title">{resource.title}</div>
+                            <div className="cw-resource-meta">{resource.source || "Web"}</div>
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                    {!materialAnalysis.web_resources?.length && materialAnalysis.web_resources_error && <div className="cw-analysis-note">{materialAnalysis.web_resources_error}</div>}
+                  </div>
+                )}
               </div>
             ) : (
-              <div className="rec-empty">Use “Study with AI” to turn your classroom data into a study plan, reminders, and key topics.</div>
+              <div className="rec-empty">Use “Study with AI” to turn your classroom data into a study plan, reminders, and key topics. Attached files can also be analyzed here.</div>
             )}
           </div>
         </div>
@@ -2041,7 +2129,7 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
   );
 }
 
-function ClassroomSidePanel({ open, onClose, classroomData, classroomCourses, selectedCourseId, coursework, announcements, allAnnouncements, insights, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onConnectClassroom }) {
+function ClassroomSidePanel({ open, onClose, classroomData, classroomCourses, selectedCourseId, coursework, announcements, allAnnouncements, insights, materialAnalysis, materialLoadingKey, loadingCourses, loadingDetails, analyzing, error, onSelectCourse, onAnalyze, onAnalyzeMaterial, onConnectClassroom }) {
   useScrollLock();
 
   useEffect(() => {
@@ -2073,12 +2161,15 @@ function ClassroomSidePanel({ open, onClose, classroomData, classroomCourses, se
             announcements={announcements}
             allAnnouncements={allAnnouncements}
             insights={insights}
+            materialAnalysis={materialAnalysis}
+            materialLoadingKey={materialLoadingKey}
             loadingCourses={loadingCourses}
             loadingDetails={loadingDetails}
             analyzing={analyzing}
             error={error}
             onSelectCourse={onSelectCourse}
             onAnalyze={onAnalyze}
+            onAnalyzeMaterial={onAnalyzeMaterial}
             onConnectClassroom={onConnectClassroom}
           />
         </div>
@@ -2293,6 +2384,8 @@ export default function Home() {
   const [classroomAnnouncements, setClassroomAnnouncements] = useState([]);
   const [classroomAllAnnouncements, setClassroomAllAnnouncements] = useState([]);
   const [classroomInsights, setClassroomInsights] = useState(null);
+  const [classroomMaterialAnalysis, setClassroomMaterialAnalysis] = useState(null);
+  const [classroomMaterialLoadingKey, setClassroomMaterialLoadingKey] = useState("");
   const [classroomLoading, setClassroomLoading] = useState(false);
   const [classroomWorkspaceLoading, setClassroomWorkspaceLoading] = useState(false);
   const [classroomDetailsLoading, setClassroomDetailsLoading] = useState(false);
@@ -2466,6 +2559,8 @@ export default function Home() {
     classroomCourseDetailsCacheRef.current = {};
     classroomAnnouncementFeedCacheRef.current = {};
     setClassroomAllAnnouncements([]);
+    setClassroomMaterialAnalysis(null);
+    setClassroomMaterialLoadingKey("");
   }, [currentUser?.id]);
 
   const rebuildAnnouncementFeed = useCallback(() => {
@@ -2509,6 +2604,7 @@ export default function Home() {
     if (cached) {
       setClassroomCoursework(cached.coursework || []);
       setClassroomAnnouncements(cached.announcements || []);
+      setClassroomMaterialAnalysis(null);
       setClassroomDetailsLoading(false);
       return;
     }
@@ -2533,6 +2629,7 @@ export default function Home() {
       rebuildAnnouncementFeed();
       setClassroomCoursework(nextDetails.coursework);
       setClassroomAnnouncements(nextDetails.announcements);
+      setClassroomMaterialAnalysis(null);
     } catch (e) {
       if (requestId !== classroomDetailsRequestRef.current) return;
       console.error(e);
@@ -2582,6 +2679,30 @@ export default function Home() {
       setClassroomAnalyzeLoading(false);
     }
   }, [currentUser, classroomData?.connected, classroomSelectedCourseId]);
+
+  const handleAnalyzeClassroomMaterial = useCallback(async (item, material, itemKind = "coursework", analysisType = "study") => {
+    if (!currentUser || !classroomData?.connected || !classroomSelectedCourseId) return;
+    const nextKey = `${itemKind}-${item.id}-${material.material_id || material.id}`;
+    setClassroomMaterialLoadingKey(nextKey);
+    setClassroomError("");
+    try {
+      const data = await analyzeClassroomMaterial({
+        course_id: classroomSelectedCourseId,
+        item_id: item.id,
+        material_id: material.material_id || material.id,
+        item_kind: itemKind,
+        analysis_type: analysisType,
+        level,
+      });
+      setClassroomMaterialAnalysis(data);
+      setClassroomInsights((prev) => prev || null);
+    } catch (e) {
+      console.error(e);
+      setClassroomError(getErrorMessage(e, "Could not analyze this classroom file right now."));
+    } finally {
+      setClassroomMaterialLoadingKey("");
+    }
+  }, [currentUser, classroomData?.connected, classroomSelectedCourseId, level]);
 
   const handleOpenClassroomPanel = useCallback(() => {
     if (!currentUser) {
@@ -3683,9 +3804,80 @@ export default function Home() {
         .cw-assignment-title { font-weight:700; color:var(--text); }
         .cw-assignment-meta { color:var(--text3); font-size:.78rem; }
         .cw-assignment-desc { color:var(--text2); font-size:.84rem; line-height:1.55; }
+        .cw-material-list { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+        .cw-material-label { font-size:.72rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--text3); }
+        .cw-material-card {
+          display:flex;
+          align-items:flex-start;
+          justify-content:space-between;
+          gap:10px;
+          padding:10px 12px;
+          border-radius:12px;
+          border:1px solid var(--border);
+          background:var(--surface);
+        }
+        .cw-material-main { min-width:0; }
+        .cw-material-title { font-weight:700; color:var(--text); line-height:1.45; }
+        .cw-material-meta { color:var(--text3); font-size:.76rem; margin-top:3px; text-transform:capitalize; }
+        .cw-material-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
+        .cw-material-link,
+        .cw-material-btn {
+          border:1px solid var(--border);
+          border-radius:10px;
+          padding:7px 10px;
+          background:rgba(255,255,255,.72);
+          color:var(--text);
+          font-size:.78rem;
+          font-weight:700;
+          cursor:pointer;
+          text-decoration:none;
+        }
+        body.dark-mode .cw-material-link,
+        body.dark-mode .cw-material-btn { background:rgba(255,255,255,.04); }
+        .cw-material-btn-solve {
+          border-color:rgba(16,185,129,.3);
+          background:rgba(16,185,129,.08);
+          color:var(--green);
+        }
+        .cw-material-btn:disabled { opacity:.6; cursor:not-allowed; }
         .cw-insights { display:flex; flex-direction:column; gap:12px; }
         .cw-summary { color:var(--text2); line-height:1.65; }
         .cw-block { display:flex; flex-direction:column; gap:8px; }
+        .cw-sub-block { display:flex; flex-direction:column; gap:8px; margin-top:4px; }
+        .cw-material-analysis {
+          margin-top:8px;
+          padding-top:10px;
+          border-top:1px dashed var(--border);
+        }
+        .cw-analysis-note {
+          padding:10px 12px;
+          border-radius:12px;
+          background:rgba(249,115,22,.08);
+          color:var(--text2);
+          line-height:1.55;
+          font-size:.82rem;
+        }
+        .cw-solution-card {
+          padding:12px;
+          border-radius:14px;
+          background:rgba(16,185,129,.08);
+          border:1px solid rgba(16,185,129,.18);
+          color:var(--text);
+        }
+        .cw-resource-list { display:flex; flex-direction:column; gap:8px; margin-top:4px; }
+        .cw-resource-card {
+          display:flex;
+          flex-direction:column;
+          gap:4px;
+          padding:11px 12px;
+          border-radius:12px;
+          border:1px solid var(--border);
+          background:var(--surface);
+          color:var(--text);
+          text-decoration:none;
+        }
+        .cw-resource-title { font-weight:700; line-height:1.45; }
+        .cw-resource-meta { color:var(--text3); font-size:.78rem; }
         .cw-topic-chips { display:flex; flex-wrap:wrap; gap:8px; }
         .cw-topic-chip {
           display:inline-flex;
@@ -5147,7 +5339,7 @@ export default function Home() {
           currentUser={currentUser}
           courses={profileCourses}
           onCoursesRefresh={refreshProfileCourses}
-          onSignOut={async () => { await clearSession(); setCurrentUser(null); setProfileCourses([]); setProfileOpen(false); setRecommendations(null); setClassroomData(null); setClassroomCourses([]); setClassroomSelectedCourseId(""); setClassroomCoursework([]); setClassroomAnnouncements([]); setClassroomInsights(null); setUseClassroomData(false); setClassroomInfoOpen(false); }}
+          onSignOut={async () => { await clearSession(); setCurrentUser(null); setProfileCourses([]); setProfileOpen(false); setRecommendations(null); setClassroomData(null); setClassroomCourses([]); setClassroomSelectedCourseId(""); setClassroomCoursework([]); setClassroomAnnouncements([]); setClassroomInsights(null); setClassroomMaterialAnalysis(null); setClassroomMaterialLoadingKey(""); setUseClassroomData(false); setClassroomInfoOpen(false); }}
         />
       )}
 
@@ -5180,12 +5372,15 @@ export default function Home() {
         announcements={classroomAnnouncements}
         allAnnouncements={classroomAllAnnouncements}
         insights={classroomInsights}
+        materialAnalysis={classroomMaterialAnalysis}
+        materialLoadingKey={classroomMaterialLoadingKey}
         loadingCourses={classroomWorkspaceLoading}
         loadingDetails={classroomDetailsLoading}
         analyzing={classroomAnalyzeLoading}
         error={classroomError}
         onSelectCourse={loadCourseDetails}
         onAnalyze={handleAnalyzeClassroom}
+        onAnalyzeMaterial={handleAnalyzeClassroomMaterial}
         onConnectClassroom={handleConnectClassroom}
       />
 

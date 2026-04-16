@@ -5,3 +5,5 @@ groq
 requests
 google-api-python-client
 psycopg[binary]
+pypdf
+python-docx

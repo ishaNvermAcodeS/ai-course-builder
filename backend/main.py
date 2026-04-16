@@ -9,6 +9,7 @@ from groq import Groq
 from services.youtube_service import search_youtube_videos
 import hashlib
 import html
+from io import BytesIO
 import json
 import os
 import re
@@ -22,6 +23,14 @@ try:
 except ImportError:  # pragma: no cover - postgres dependency is optional locally
     psycopg = None
     dict_row = None
+try:
+    from pypdf import PdfReader
+except ImportError:  # pragma: no cover - optional dependency for file parsing
+    PdfReader = None
+try:
+    from docx import Document as DocxDocument
+except ImportError:  # pragma: no cover - optional dependency for file parsing
+    DocxDocument = None
 
 load_dotenv()
 
@@ -65,10 +74,12 @@ GOOGLE_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
     "https://www.googleapis.com/auth/classroom.coursework.me.readonly",
     "https://www.googleapis.com/auth/classroom.announcements.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
 ]
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_CLASSROOM_API = "https://classroom.googleapis.com/v1"
+GOOGLE_DRIVE_API = "https://www.googleapis.com/drive/v3"
 CLASSROOM_URGENT_DAYS = 2
 oauth_state_store = {}
 VIDEO_HOST_BLOCKLIST = {
@@ -93,6 +104,7 @@ goal_guide = {
 }
 INACTIVITY_HOURS = 24
 CLASSROOM_DEADLINE_WINDOW_DAYS = 7
+DOCUMENT_TEXT_LIMIT = 12000
 
 QUANTITATIVE_KEYWORDS = {
     "algebra", "calculus", "geometry", "trigonometry", "statistics", "probability",
@@ -545,6 +557,13 @@ def strip_fences(text: str) -> str:
     return cleaned
 
 
+def truncate_text(text: str, limit: int = DOCUMENT_TEXT_LIMIT) -> str:
+    cleaned = (text or "").strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + "\n\n[Content truncated for analysis]"
+
+
 def parse_json_object(text: str):
     cleaned = strip_fences(text)
     try:
@@ -557,6 +576,53 @@ def parse_json_object(text: str):
             return json.loads(match.group(0))
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=502, detail="Model returned malformed JSON.") from exc
+
+
+def decode_text_bytes(data: bytes) -> str:
+    for encoding in ("utf-8", "utf-16", "latin-1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="ignore")
+
+
+def extract_text_from_pdf_bytes(data: bytes) -> str:
+    if PdfReader is None:
+        raise HTTPException(status_code=500, detail="PDF parsing is unavailable. Install pypdf in the backend environment.")
+    reader = PdfReader(BytesIO(data))
+    pages = [page.extract_text() or "" for page in reader.pages]
+    return "\n".join(page.strip() for page in pages if page.strip())
+
+
+def extract_text_from_docx_bytes(data: bytes) -> str:
+    if DocxDocument is None:
+        raise HTTPException(status_code=500, detail="DOCX parsing is unavailable. Install python-docx in the backend environment.")
+    document = DocxDocument(BytesIO(data))
+    parts = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+    return "\n".join(parts)
+
+
+def extract_text_from_file_bytes(data: bytes, mime_type: str = "", file_name: str = "") -> str:
+    lower_name = (file_name or "").lower()
+    mime = (mime_type or "").lower()
+    if mime == "application/pdf" or lower_name.endswith(".pdf"):
+        return extract_text_from_pdf_bytes(data)
+    if (
+        mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        or lower_name.endswith(".docx")
+    ):
+        return extract_text_from_docx_bytes(data)
+    if (
+        mime.startswith("text/")
+        or lower_name.endswith((".txt", ".md", ".csv", ".json", ".py", ".js", ".ts", ".html", ".css"))
+        or mime in {"application/json", "application/xml"}
+    ):
+        return decode_text_bytes(data)
+    raise HTTPException(
+        status_code=415,
+        detail=f"Unsupported file type for analysis: {mime_type or file_name or 'unknown file'}",
+    )
 
 
 def call_llm(prompt: str, max_tokens: Optional[int] = None, messages: Optional[list] = None):
@@ -1214,32 +1280,156 @@ def get_google_access_token(user_id: int) -> str:
     return refresh_google_access_token(user_id, connection["refresh_token"] or "")
 
 
-def google_classroom_get(user_id: int, path: str, params: Optional[dict] = None):
+def google_authorized_request(user_id: int, method: str, url: str, **kwargs):
     access_token = get_google_access_token(user_id)
-    url = f"{GOOGLE_CLASSROOM_API}{path}"
-    try:
-        response = requests.get(
-            url,
-            params=params or {},
-            headers={"Authorization": f"Bearer {access_token}"},
-            timeout=20,
-        )
-    except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"Google Classroom request failed: {exc}") from exc
-    if response.status_code == 401:
-        access_token = refresh_google_access_token(user_id, get_classroom_connection_row(user_id)["refresh_token"] or "")
+    headers = dict(kwargs.pop("headers", {}) or {})
+    headers["Authorization"] = f"Bearer {access_token}"
+    response = None
+    for attempt in range(2):
         try:
-            response = requests.get(
-                url,
-                params=params or {},
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=20,
-            )
+            response = requests.request(method, url, headers=headers, timeout=20, **kwargs)
         except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=f"Google Classroom request failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail=f"Google API request failed: {exc}") from exc
+        if response.status_code != 401 or attempt == 1:
+            break
+        refreshed_token = refresh_google_access_token(user_id, get_classroom_connection_row(user_id)["refresh_token"] or "")
+        headers["Authorization"] = f"Bearer {refreshed_token}"
+    if response is None:
+        raise HTTPException(status_code=502, detail="Google API request failed.")
+    return response
+
+
+def google_classroom_get(user_id: int, path: str, params: Optional[dict] = None):
+    url = f"{GOOGLE_CLASSROOM_API}{path}"
+    response = google_authorized_request(user_id, "GET", url, params=params or {})
     if not response.ok:
         raise HTTPException(status_code=response.status_code, detail=f"Google Classroom API error: {response.text}")
     return response.json()
+
+
+def material_fingerprint(material: dict) -> str:
+    raw = json.dumps(material or {}, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+
+def normalize_classroom_materials(materials: Optional[list]) -> list:
+    normalized = []
+    for index, material in enumerate(materials or []):
+        if not isinstance(material, dict):
+            continue
+        fingerprint = material_fingerprint(material) or f"material-{index + 1}"
+        if material.get("driveFile"):
+            drive_wrapper = material.get("driveFile") or {}
+            drive_meta = drive_wrapper.get("driveFile") if isinstance(drive_wrapper.get("driveFile"), dict) else drive_wrapper
+            file_id = str(drive_meta.get("id") or "")
+            title = safe_topic(drive_meta.get("title") or f"Drive file {index + 1}")
+            normalized.append(
+                {
+                    "id": file_id or fingerprint,
+                    "material_id": fingerprint,
+                    "kind": "drive_file",
+                    "title": title,
+                    "url": drive_meta.get("alternateLink") or "",
+                    "drive_file_id": file_id,
+                    "mime_type": drive_meta.get("mimeType") or "",
+                    "thumbnail_url": drive_meta.get("thumbnailUrl") or "",
+                    "analyzable": bool(file_id),
+                }
+            )
+            continue
+        if material.get("link"):
+            link = material.get("link") or {}
+            normalized.append(
+                {
+                    "id": fingerprint,
+                    "material_id": fingerprint,
+                    "kind": "link",
+                    "title": safe_topic(link.get("title") or "External link"),
+                    "url": link.get("url") or "",
+                    "drive_file_id": "",
+                    "mime_type": "",
+                    "thumbnail_url": "",
+                    "analyzable": False,
+                }
+            )
+            continue
+        if material.get("youtubeVideo"):
+            video = material.get("youtubeVideo") or {}
+            normalized.append(
+                {
+                    "id": fingerprint,
+                    "material_id": fingerprint,
+                    "kind": "youtube",
+                    "title": safe_topic(video.get("title") or "YouTube video"),
+                    "url": video.get("alternateLink") or "",
+                    "drive_file_id": "",
+                    "mime_type": "",
+                    "thumbnail_url": video.get("thumbnailUrl") or "",
+                    "analyzable": False,
+                }
+            )
+            continue
+        if material.get("form"):
+            form = material.get("form") or {}
+            normalized.append(
+                {
+                    "id": fingerprint,
+                    "material_id": fingerprint,
+                    "kind": "form",
+                    "title": safe_topic(form.get("title") or "Google Form"),
+                    "url": form.get("formUrl") or "",
+                    "drive_file_id": "",
+                    "mime_type": "",
+                    "thumbnail_url": "",
+                    "analyzable": False,
+                }
+            )
+    return normalized
+
+
+def download_drive_material_bytes(user_id: int, material: dict):
+    drive_file_id = (material or {}).get("drive_file_id") or (material or {}).get("id")
+    if not drive_file_id:
+        raise HTTPException(status_code=400, detail="This material cannot be downloaded for analysis.")
+    mime_type = (material or {}).get("mime_type") or ""
+    title = safe_topic((material or {}).get("title") or "Classroom file")
+    if mime_type.startswith("application/vnd.google-apps"):
+        export_mime = "application/pdf"
+        response = google_authorized_request(
+            user_id,
+            "GET",
+            f"{GOOGLE_DRIVE_API}/files/{drive_file_id}/export",
+            params={"mimeType": export_mime},
+        )
+        if not response.ok:
+            raise HTTPException(status_code=response.status_code, detail=f"Google Drive export error: {response.text}")
+        return response.content, export_mime, f"{title}.pdf"
+    response = google_authorized_request(
+        user_id,
+        "GET",
+        f"{GOOGLE_DRIVE_API}/files/{drive_file_id}",
+        params={"alt": "media"},
+    )
+    if not response.ok:
+        raise HTTPException(status_code=response.status_code, detail=f"Google Drive download error: {response.text}")
+    content_type = response.headers.get("Content-Type") or mime_type or "application/octet-stream"
+    return response.content, content_type, title
+
+
+def find_material_in_course(user_id: int, course_id: str, item_id: str, material_id: str, item_kind: str = "coursework"):
+    source_kind = "announcement" if safe_topic(item_kind).lower() == "announcement" else "coursework"
+    items = (
+        fetch_google_classroom_announcements(user_id, course_id)
+        if source_kind == "announcement"
+        else fetch_google_classroom_coursework(user_id, course_id)
+    )
+    for item in items:
+        if item.get("id") != item_id:
+            continue
+        for material in item.get("materials", []):
+            if material.get("material_id") == material_id or material.get("id") == material_id:
+                return source_kind, item, material
+    raise HTTPException(status_code=404, detail="The requested classroom file was not found.")
 
 
 def fetch_google_classroom_courses(user_id: int) -> list:
@@ -1266,6 +1456,8 @@ def fetch_google_classroom_coursework(user_id: int, course_id: str) -> list:
             "description": safe_topic(work.get("description")),
             "due_at": build_google_due_at(work.get("dueDate"), work.get("dueTime")),
             "alternate_link": work.get("alternateLink", ""),
+            "work_type": safe_topic(work.get("workType") or "ASSIGNMENT"),
+            "materials": normalize_classroom_materials(work.get("materials")),
             "raw": work,
         })
     return items
@@ -1281,6 +1473,7 @@ def fetch_google_classroom_announcements(user_id: int, course_id: str) -> list:
             "text": safe_topic(announcement.get("text")),
             "update_time": announcement.get("updateTime") or announcement.get("creationTime"),
             "alternate_link": announcement.get("alternateLink", ""),
+            "materials": normalize_classroom_materials(announcement.get("materials")),
         })
     return items
 
@@ -1300,6 +1493,7 @@ def sync_google_classroom_snapshot(user_id: int):
                 "description": work["description"],
                 "due_at": work["due_at"],
                 "alternate_link": work["alternate_link"],
+                "materials": work["materials"],
                 "raw": work["raw"],
             })
     connection = get_classroom_connection_row(user_id)
@@ -1371,6 +1565,8 @@ def get_classroom_snapshot(user_id: int):
                 "due_at": due_at,
                 "days_until_due": days_until_due,
                 "raw": json.loads(row["raw_json"]),
+                "description": (json.loads(row["raw_json"]) if row["raw_json"] else {}).get("description", ""),
+                "materials": normalize_classroom_materials((json.loads(row["raw_json"]) if row["raw_json"] else {}).get("materials")),
                 "updated_at": row["updated_at"],
             }
         )
@@ -1785,6 +1981,15 @@ class ClassroomAnalyzeRequest(BaseModel):
     course_id: Optional[str] = ""
 
 
+class ClassroomMaterialAnalyzeRequest(BaseModel):
+    course_id: str
+    item_id: str
+    material_id: str
+    item_kind: Optional[str] = "coursework"
+    analysis_type: Optional[str] = "study"
+    level: Optional[str] = "Intermediate"
+
+
 class AutonomousTriggerRequest(BaseModel):
     course_topic: str
     level: str
@@ -2146,6 +2351,99 @@ Notifications:
         "assignments": assignments,
         "notifications": notifications,
         "insights": insights,
+    }
+
+
+@app.post("/classroom/materials/analyze")
+def classroom_material_analyze(request: ClassroomMaterialAnalyzeRequest, kirigumi_session: Optional[str] = Cookie(default=None)):
+    user = get_current_user(kirigumi_session)
+    touch_learner_activity(user["id"])
+    course_id = safe_topic(request.course_id)
+    item_id = safe_topic(request.item_id)
+    material_id = safe_topic(request.material_id)
+    source_kind, item, material = find_material_in_course(
+        user["id"],
+        course_id,
+        item_id,
+        material_id,
+        request.item_kind or "coursework",
+    )
+
+    extraction_notice = ""
+    extracted_text = ""
+    try:
+        file_bytes, detected_mime_type, file_name = download_drive_material_bytes(user["id"], material)
+        extracted_text = truncate_text(
+            extract_text_from_file_bytes(file_bytes, detected_mime_type, file_name),
+            DOCUMENT_TEXT_LIMIT,
+        )
+    except HTTPException as exc:
+        if exc.status_code in {400, 415}:
+            extraction_notice = exc.detail
+        else:
+            raise
+
+    item_title = safe_topic(item.get("title") or item.get("text") or "Classroom item")
+    item_description = safe_topic(item.get("description") or item.get("text") or "")
+    level = request.level if request.level in difficulty_guide else "Intermediate"
+    requested_type = safe_topic(request.analysis_type or "study").lower()
+    assignment_like = requested_type == "assignment" or any(
+        keyword in f"{item_title} {item_description} {(material.get('title') or '')}".lower()
+        for keyword in ("assignment", "worksheet", "homework", "problem set", "quiz", "lab")
+    )
+    analysis_mode = "assignment" if assignment_like else "study"
+    content_for_analysis = extracted_text or truncate_text(
+        f"Title: {item_title}\nDescription: {item_description}\nMaterial: {material.get('title') or ''}"
+    )
+
+    prompt = f"""
+You are an academic document analyst.
+Return valid JSON with these keys:
+- detected_type: "assignment" or "study"
+- search_topic: a short topic phrase for finding study resources
+- summary: one concise paragraph
+- key_points: array of 4 to 6 clear bullet-style strings
+- study_plan: array of 3 to 5 actionable next steps
+- assignment_solution: a worked solution string if the document is an assignment, otherwise ""
+
+Context:
+- Classroom item kind: {source_kind}
+- Requested analysis mode: {analysis_mode}
+- Level: {level}
+- Course item title: {item_title}
+- Course item description: {item_description}
+- File title: {material.get("title") or ""}
+
+Document text:
+{content_for_analysis}
+"""
+    analysis = parse_json_object(call_llm(prompt, max_tokens=1400))
+    search_topic = safe_topic(
+        analysis.get("search_topic")
+        or material.get("title")
+        or item_title
+        or "study topic"
+    )
+    videos = search_youtube_videos(search_topic, level)
+    web_payload = get_web_resources_payload(search_topic, level)
+    return {
+        "course_id": course_id,
+        "item_id": item_id,
+        "item_kind": source_kind,
+        "material": material,
+        "analysis": {
+            "detected_type": "assignment" if analysis_mode == "assignment" else safe_topic(analysis.get("detected_type") or "study").lower(),
+            "search_topic": search_topic,
+            "summary": safe_topic(analysis.get("summary")),
+            "key_points": analysis.get("key_points") if isinstance(analysis.get("key_points"), list) else [],
+            "study_plan": analysis.get("study_plan") if isinstance(analysis.get("study_plan"), list) else [],
+            "assignment_solution": strip_fences(str(analysis.get("assignment_solution") or "")),
+            "extraction_notice": extraction_notice,
+            "source_excerpt": content_for_analysis,
+        },
+        "youtube_resources": videos,
+        "web_resources": web_payload.get("articles", []),
+        "web_resources_error": web_payload.get("error", ""),
     }
 
 
@@ -2559,14 +2857,7 @@ Rules:
 
 # ── Resource endpoints ────────────────────────────────────────────────────────
 
-@app.get("/youtube-resources")
-def get_youtube_resources(topic: str, level: str):
-    videos = search_youtube_videos(topic, level)
-    return {"topic": topic, "level": level, "videos": videos}
-
-
-@app.get("/web-resources")
-def get_web_resources(topic: str, level: str):
+def get_web_resources_payload(topic: str, level: str):
     if not TAVILY_API_KEY:
         return {
             "topic": topic,
@@ -2666,3 +2957,14 @@ def get_web_resources(topic: str, level: str):
         "articles": [],
         "error": last_error or "Tavily found no English web resources for this topic.",
     }
+
+
+@app.get("/youtube-resources")
+def get_youtube_resources(topic: str, level: str):
+    videos = search_youtube_videos(topic, level)
+    return {"topic": topic, "level": level, "videos": videos}
+
+
+@app.get("/web-resources")
+def get_web_resources(topic: str, level: str):
+    return get_web_resources_payload(topic, level)
