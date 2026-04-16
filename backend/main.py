@@ -1323,10 +1323,11 @@ def normalize_classroom_materials(materials: Optional[list]) -> list:
             drive_meta = drive_wrapper.get("driveFile") if isinstance(drive_wrapper.get("driveFile"), dict) else drive_wrapper
             file_id = str(drive_meta.get("id") or "")
             title = safe_topic(drive_meta.get("title") or f"Drive file {index + 1}")
+            stable_material_id = file_id or fingerprint
             normalized.append(
                 {
                     "id": file_id or fingerprint,
-                    "material_id": fingerprint,
+                    "material_id": stable_material_id,
                     "kind": "drive_file",
                     "title": title,
                     "url": drive_meta.get("alternateLink") or "",
@@ -1339,10 +1340,11 @@ def normalize_classroom_materials(materials: Optional[list]) -> list:
             continue
         if material.get("link"):
             link = material.get("link") or {}
+            stable_material_id = link.get("url") or fingerprint
             normalized.append(
                 {
-                    "id": fingerprint,
-                    "material_id": fingerprint,
+                    "id": stable_material_id,
+                    "material_id": stable_material_id,
                     "kind": "link",
                     "title": safe_topic(link.get("title") or "External link"),
                     "url": link.get("url") or "",
@@ -1355,10 +1357,11 @@ def normalize_classroom_materials(materials: Optional[list]) -> list:
             continue
         if material.get("youtubeVideo"):
             video = material.get("youtubeVideo") or {}
+            stable_material_id = video.get("alternateLink") or fingerprint
             normalized.append(
                 {
-                    "id": fingerprint,
-                    "material_id": fingerprint,
+                    "id": stable_material_id,
+                    "material_id": stable_material_id,
                     "kind": "youtube",
                     "title": safe_topic(video.get("title") or "YouTube video"),
                     "url": video.get("alternateLink") or "",
@@ -1371,10 +1374,11 @@ def normalize_classroom_materials(materials: Optional[list]) -> list:
             continue
         if material.get("form"):
             form = material.get("form") or {}
+            stable_material_id = form.get("formUrl") or fingerprint
             normalized.append(
                 {
-                    "id": fingerprint,
-                    "material_id": fingerprint,
+                    "id": stable_material_id,
+                    "material_id": stable_material_id,
                     "kind": "form",
                     "title": safe_topic(form.get("title") or "Google Form"),
                     "url": form.get("formUrl") or "",

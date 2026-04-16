@@ -1894,10 +1894,18 @@ function ClassroomSnapshotCard({ classroomData, onConnectClassroom, classroomLoa
   );
 }
 
+function getMaterialPrimaryAction(item, material) {
+  const combined = `${item?.title || ""} ${item?.description || ""} ${material?.title || ""} ${material?.mime_type || ""}`.toLowerCase();
+  const solveSignals = /(assignment|worksheet|homework|problem set|question paper|lab|quiz|test|exam|set[-\s]?\d+|exercise)/i;
+  const studySignals = /(syllabus|module|lesson|lecture|notes|study material|reading|chapter|unit|reference|handout|slides|ppt|outline|answer key|solution key)/i;
+  if (studySignals.test(combined)) return "study";
+  if (solveSignals.test(combined)) return "assignment";
+  return itemKind === "coursework" ? "assignment" : "study";
+}
+
 function ClassroomMaterialList({ item, itemKind, onAnalyzeMaterial, materialLoadingKey }) {
   const materials = item?.materials || [];
   if (!materials.length) return null;
-  const assignmentLike = /assignment|worksheet|homework|problem set|quiz|lab/i.test(`${item?.title || ""} ${item?.description || ""}`);
 
   return (
     <div className="cw-material-list">
@@ -1905,6 +1913,7 @@ function ClassroomMaterialList({ item, itemKind, onAnalyzeMaterial, materialLoad
       {materials.map((material, index) => {
         const analyzeKey = `${itemKind}-${item.id}-${material.material_id || material.id}`;
         const isLoading = materialLoadingKey === analyzeKey;
+        const primaryAction = getMaterialPrimaryAction(item, material);
         return (
           <div key={`${material.id || material.material_id || material.url || index}`} className="cw-material-card">
             <div className="cw-material-main">
@@ -1914,16 +1923,13 @@ function ClassroomMaterialList({ item, itemKind, onAnalyzeMaterial, materialLoad
             <div className="cw-material-actions">
               {material.url && <a className="cw-material-link" href={material.url} target="_blank" rel="noreferrer">Open</a>}
               {material.analyzable && (
-                <>
-                  <button className="cw-material-btn" onClick={() => onAnalyzeMaterial(item, material, itemKind, "study")} disabled={isLoading}>
-                    {isLoading ? "Analyzing…" : "Study File"}
-                  </button>
-                  {assignmentLike && (
-                    <button className="cw-material-btn cw-material-btn-solve" onClick={() => onAnalyzeMaterial(item, material, itemKind, "assignment")} disabled={isLoading}>
-                      {isLoading ? "Analyzing…" : "Solve"}
-                    </button>
-                  )}
-                </>
+                <button
+                  className={`cw-material-btn ${primaryAction === "assignment" ? "cw-material-btn-solve" : ""}`}
+                  onClick={() => onAnalyzeMaterial(item, material, itemKind, primaryAction)}
+                  disabled={isLoading}
+                >
+                  {isLoading ? "Analyzing…" : (primaryAction === "assignment" ? "Solve" : "Study File")}
+                </button>
               )}
             </div>
           </div>
@@ -1949,7 +1955,11 @@ function ClassroomWorkspace({ classroomData, classroomCourses, selectedCourseId,
       tone: "upcoming",
       kind: "Announcement",
     })),
-  ];
+  ].sort((a, b) => {
+    const aTime = new Date(a.update_time || a.creation_time || a.due_at || 0).getTime();
+    const bTime = new Date(b.update_time || b.creation_time || b.due_at || 0).getTime();
+    return bTime - aTime;
+  });
 
   return (
     <div className="classroom-workspace">
@@ -2681,13 +2691,14 @@ export default function Home() {
   }, [currentUser, classroomData?.connected, classroomSelectedCourseId]);
 
   const handleAnalyzeClassroomMaterial = useCallback(async (item, material, itemKind = "coursework", analysisType = "study") => {
-    if (!currentUser || !classroomData?.connected || !classroomSelectedCourseId) return;
+    const effectiveCourseId = item?.course_id || classroomSelectedCourseId;
+    if (!currentUser || !classroomData?.connected || !effectiveCourseId) return;
     const nextKey = `${itemKind}-${item.id}-${material.material_id || material.id}`;
     setClassroomMaterialLoadingKey(nextKey);
     setClassroomError("");
     try {
       const data = await analyzeClassroomMaterial({
-        course_id: classroomSelectedCourseId,
+        course_id: effectiveCourseId,
         item_id: item.id,
         material_id: material.material_id || material.id,
         item_kind: itemKind,
